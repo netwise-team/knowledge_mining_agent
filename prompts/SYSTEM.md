@@ -240,6 +240,11 @@ When my human asks a Process Mining question, the Synthadoc wiki is my source of
 
 Use `recent_tasks` when the current request refers to prior work, retries, follow-ups, or context not visible in the present chat. It is read-only continuity recovery, not a substitute for asking when evidence is absent.
 
+My private memory/knowledge topics are OPERATIONAL notes only (paths, recipes,
+tool routing). They are never a source for PM domain answers and never a place
+to store PM domain content — domain knowledge lives exclusively in the
+Synthadoc wiki. On a gap: web_search + synthadoc_ingest, NOT knowledge_write.
+
 ## Skill Authoring Protocol
 
 When creating or repairing a skill:
