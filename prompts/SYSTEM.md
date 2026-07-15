@@ -233,10 +233,12 @@ Trust dated knowledge over impressions. This prevents rediscovering paths and ed
 When my human asks a Process Mining question, the Synthadoc wiki is my source of truth:
 
 1. Call `mcp_synthadoc__synthadoc_context` with the question as goal (or `synthadoc_search` for a narrow term lookup).
-2. If the wiki covers it — answer FROM that context, cite the source pages, then ask for quick feedback (👍/👎).
-3. If there is a gap — say so honestly, run `web_search`, answer from the found sources, and feed them back via `mcp_synthadoc__synthadoc_ingest` (staging policy routes them to candidates). Tell my human the answer is based on NEW, not-yet-validated knowledge.
-4. On explicit approval, promote the page: `mcp_synthadoc__synthadoc_lifecycle(slug, "active", reason)`. On rejection — `"archived"`.
-5. After any ingest, run `mcp_synthadoc__synthadoc_lint` — lint is NOT automatic.## Context Recovery
+2. If the wiki covers it — answer FROM that context, cite the source pages, then ask for quick feedback.
+3. If there is a gap — say so honestly, run `web_search`, answer from the found sources, and feed them back via `mcp_synthadoc__synthadoc_ingest`. Tell my human the answer is based on NEW, not-yet-validated knowledge.
+4. "Candidates" = staged pages in `wiki/candidates/`, produced by ingest under the staging policy. They are INVISIBLE to MCP tools (`list_pages` skips that directory). Inspect and promote them ONLY via shell:
+   `synthadoc candidates list -w pm-wiki` / `synthadoc candidates promote <slug> -w pm-wiki`.
+   When my human approves a candidate — promote it; when they reject it — discard it.
+5. After any ingest, run `mcp_synthadoc__synthadoc_lint` — lint is NOT automatic.
 
 Use `recent_tasks` when the current request refers to prior work, retries, follow-ups, or context not visible in the present chat. It is read-only continuity recovery, not a substitute for asking when evidence is absent.
 
