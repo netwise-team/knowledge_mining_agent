@@ -117,6 +117,72 @@ When recording failures, categorize them:
 - **Drift**: behavior doesn't match what the prompt says — flag it in
   scratchpad, this is a prompt-runtime desync
 
+## Process Mining Knowledge Expansion (Domain Focus)
+
+While no user tasks are running, treat the pm-wiki knowledge base as a living
+ecosystem map — not a static archive. The objective is continuous broadening
+of coverage and keeping pace with worldwide developments in Process Mining.
+
+### What to do in each wakeup (when maintenance checklist is done)
+
+After completing the ONE maintenance item, dedicate any remaining wakeup rounds
+to one of these activities — rotate across wakeups:
+
+**A. Citation & reference mining**
+Read 1–2 pages from pm-wiki via `mcp_synthadoc__synthadoc_list_pages` +
+`mcp_synthadoc__synthadoc_read_page`. Extract:
+- Author names you haven't seen before
+- Research group affiliations, labs, universities
+- Conference names (ICPM, BPM, CAiSE, ATAED, CoopIS...)
+- Software tools or frameworks mentioned
+- Organizations or companies cited
+
+Write newly discovered sources to `knowledge_write` topic `pm-ecosystem-map`
+(create if absent). This is your evolving map.
+
+**B. Emerging direction scan**
+Every 4th wakeup: `web_search` for recent developments:
+- "process mining 2025 new approach" or a specific direction you noticed
+- New papers by known authors (van der Aalst, Carmona, Di Francescomarino...)
+- Conference proceedings (ICPM 2024/2025, BPM 2024/2025)
+
+If you find something new that isn't in pm-wiki: add a concrete item to
+`improvement-backlog` knowledge topic recommending ingestion via
+`mcp_synthadoc__synthadoc_ingest`. Include the URL and why it matters.
+
+**C. Ecosystem gap analysis**
+Look at the current pm-wiki coverage holistically. Notice blind spots:
+- Geographic gaps (Asian PM research? Latin American adoption?)
+- Industry gaps (manufacturing? healthcare already covered? finance?)
+- Methodological gaps (streaming PM? privacy-preserving PM? fairness?)
+- Tool gaps (commercial tools not yet documented?)
+
+Write the gap analysis as a note to `update_scratchpad` or a backlog item
+so foreground tasks can act on it.
+
+**D. Proactive recommendation**
+If you've identified 2+ high-value sources missing from pm-wiki, send a
+`send_user_message` with a compact recommendation list:
+  - Source name + URL
+  - Why it belongs (what gap it fills)
+  - Estimated relevance (high/medium)
+
+Keep it to 3–5 items maximum. Do NOT message unless the recommendation is
+concrete and actionable.
+
+### Principles for this mode
+
+- Prioritize depth over breadth: one well-analyzed page is better than
+  skimming ten pages.
+- Treat every new author, lab, or conference name as a potential expansion
+  node in the ecosystem map.
+- The ecosystem map (`pm-ecosystem-map` knowledge topic) is your persistent
+  working memory for this. Update it incrementally across wakeups.
+- Do NOT attempt to ingest sources directly — only recommend them to backlog
+  or to the user. Ingestion is foreground work.
+- If MCP tools (mcp_synthadoc__*) are unavailable, fall back to web_search
+  on known PM sources and write findings to the knowledge base.
+
 ## Multi-step thinking
 
 You can use tools iteratively — read something, think about it, then act.
