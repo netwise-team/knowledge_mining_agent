@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "skills": {
+    "docx": {
+      "source": "axoviq-ai/synthadoc",
+      "sourceType": "github",
+      "skillPath": "synthadoc/skills/docx/SKILL.md",
+      "computedHash": "f0382b9466eac16e8faa2da47e5c2d65c3f40cd8c0398652e70eed6a704833dd"
+    },
+    "image": {
+      "source": "axoviq-ai/synthadoc",
+      "sourceType": "github",
+      "skillPath": "synthadoc/skills/image/SKILL.md",
+      "computedHash": "735a3f96e2b0a2cf861c91927a750175c234919107e5712ec9afb2b6f1d5821a"
+    },
+    "markdown": {
+      "source": "axoviq-ai/synthadoc",
+      "sourceType": "github",
+      "skillPath": "synthadoc/skills/markdown/SKILL.md",
+      "computedHash": "5bfc0c1c5c34249ca7923cbff276a094453b033ae3de42aff6c531fbc2afa1ff"
+    },
+    "pdf": {
+      "source": "axoviq-ai/synthadoc",
+      "sourceType": "github",
+      "skillPath": "synthadoc/skills/pdf/SKILL.md",
+      "computedHash": "119d9f3f5af21b5a297f1879d281ca2a41dbfd1981e4e53d6b6f582b8d3657e3"
+    },
+    "pptx": {
+      "source": "axoviq-ai/synthadoc",
+      "sourceType": "github",
+      "skillPath": "synthadoc/skills/pptx/SKILL.md",
+      "computedHash": "72fc7544332e7a3b77414adcdf845e9190a3a7f318a26829dca383502cd216e9"
+    },
+    "url": {
+      "source": "axoviq-ai/synthadoc",
+      "sourceType": "github",
+      "skillPath": "synthadoc/skills/url/SKILL.md",
+      "computedHash": "e268f81fe8d38b0196b6fa11b1e7879e98d7b49dcbc3e9776f156e9476b68f54"
+    },
+    "web_search": {
+      "source": "axoviq-ai/synthadoc",
+      "sourceType": "github",
+      "skillPath": "synthadoc/skills/web_search/SKILL.md",
+      "computedHash": "04c69b218f4c492e32d10d608b45bb38b7a6bb0325dfdf36ce0efa3e65b140cd"
+    },
+    "xlsx": {
+      "source": "axoviq-ai/synthadoc",
+      "sourceType": "github",
+      "skillPath": "synthadoc/skills/xlsx/SKILL.md",
+      "computedHash": "a232890d983be7779d3127c151ba9b1391ed7a90ee28659c976c653fbbd17028"
+    },
+    "youtube": {
+      "source": "axoviq-ai/synthadoc",
+      "sourceType": "github",
+      "skillPath": "synthadoc/skills/youtube/SKILL.md",
+      "computedHash": "7ec87715ce12f5ed5c4c4b3ba6346b9a85aaeabe599f8fdc482358ee1244fd1f"
+    }
+  }
+}

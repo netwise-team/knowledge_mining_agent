@@ -1,0 +1,36 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+coverage.json
+htmlcov/
+/dist/
+/build/
+*.egg-info/
+.env
+.venv/
+venv/
+node_modules/
+obsidian-plugin/node_modules/
+obsidian-plugin/coverage/
+obsidian-plugin/main.js
+.VSCodeCounter/
+.claude/
+
+# synthadoc operational — never commit
+.synthadoc/
+docs/plans/
+docs/blog/
+
+# skills CLI installs (project-local agent skill copies)
+.agents/
+
+# README-pypi.md is committed to the repo — removed from gitignore
+docs/*.docx
+synthadoc/demos/*/log.md
+
+# diagram sources — export to PNG/SVG and commit the image instead
+*.drawio
+
+# subagent test scratch directories
+test_tmp/

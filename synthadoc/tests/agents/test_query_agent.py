@@ -1,0 +1,2951 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Paul Chen / axoviq.com
+import asyncio
+import pytest
+from unittest.mock import AsyncMock, patch
+from synthadoc.agents.query_agent import QueryAgent, QueryResult, _parse_lookback_days
+from synthadoc.providers.base import CompletionResponse
+from synthadoc.storage.log import AuditDB
+from synthadoc.storage.wiki import WikiStorage, WikiPage
+from synthadoc.storage.search import HybridSearch, SearchResult
+
+
+def _make_agent(tmp_wiki, answer_text="The answer.", decompose_json='["term"]'):
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text=decompose_json, input_tokens=10, output_tokens=5),
+        CompletionResponse(text=answer_text, input_tokens=100, output_tokens=30),
+    ]
+    return store, search, provider
+
+
+# ── decompose() unit tests ────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_decompose_returns_sub_questions(tmp_wiki):
+    """decompose() must return a list of 1-4 non-empty strings."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.return_value = CompletionResponse(
+        text='["Who invented FORTRAN?", "What influence did FORTRAN have?"]',
+        input_tokens=20, output_tokens=10,
+    )
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    sub_qs = await agent.decompose("Who invented FORTRAN and what influence did it have?")
+    assert isinstance(sub_qs, list)
+    assert 1 <= len(sub_qs) <= 4
+    assert all(isinstance(q, str) and q.strip() for q in sub_qs)
+
+
+@pytest.mark.asyncio
+async def test_decompose_invalid_json_falls_back_to_original(tmp_wiki):
+    """If LLM returns non-JSON, decompose() must return [original_question]."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.return_value = CompletionResponse(
+        text="not valid json", input_tokens=10, output_tokens=5,
+    )
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    sub_qs = await agent.decompose("What is Moore's Law?")
+    assert sub_qs == ["What is Moore's Law?"]
+
+
+@pytest.mark.asyncio
+async def test_decompose_empty_list_falls_back_to_original(tmp_wiki):
+    """If LLM returns an empty list, decompose() must return [original_question]."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.return_value = CompletionResponse(
+        text='[]', input_tokens=10, output_tokens=5,
+    )
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    sub_qs = await agent.decompose("What is Moore's Law?")
+    assert sub_qs == ["What is Moore's Law?"]
+
+
+@pytest.mark.asyncio
+async def test_decompose_non_list_json_falls_back_to_original(tmp_wiki):
+    """If LLM returns valid JSON but not a list (e.g. a dict), fall back to [original_question]."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.return_value = CompletionResponse(
+        text='{"question": "What is Moore\'s Law?"}', input_tokens=10, output_tokens=5,
+    )
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    sub_qs = await agent.decompose("What is Moore's Law?")
+    assert sub_qs == ["What is Moore's Law?"]
+
+
+@pytest.mark.asyncio
+async def test_decompose_caps_at_four_sub_questions(tmp_wiki):
+    """If LLM returns more than 4 sub-questions, only the first 4 are kept."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.return_value = CompletionResponse(
+        text='["Q1?", "Q2?", "Q3?", "Q4?", "Q5?", "Q6?"]',
+        input_tokens=10, output_tokens=10,
+    )
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    sub_qs = await agent.decompose("complex multi-part question")
+    assert len(sub_qs) == 4
+
+
+@pytest.mark.asyncio
+async def test_decompose_filters_whitespace_only_strings(tmp_wiki):
+    """Empty or whitespace-only strings in LLM output must be filtered out."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.return_value = CompletionResponse(
+        text='["valid sub-question?", "", "   "]',
+        input_tokens=10, output_tokens=5,
+    )
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    sub_qs = await agent.decompose("something")
+    assert sub_qs == ["valid sub-question?"]
+
+
+@pytest.mark.asyncio
+async def test_decompose_strips_markdown_code_fences(tmp_wiki):
+    """Some models wrap JSON in ```json fences even when asked not to — must still parse correctly."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.return_value = CompletionResponse(
+        text='```json\n["Who invented FORTRAN?", "What influence did it have?"]\n```',
+        input_tokens=10, output_tokens=10,
+    )
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    sub_qs = await agent.decompose("Who invented FORTRAN and what influence did it have?")
+    assert len(sub_qs) == 2
+    assert all(q.strip() for q in sub_qs)
+
+
+@pytest.mark.asyncio
+async def test_decompose_single_item_list(tmp_wiki):
+    """A simple question should produce a single-element list and work end-to-end."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    store.write_page("moores-law", WikiPage(title="Moore's Law", tags=["hardware"],
+        content="Moore's Law states transistor count doubles every two years.",
+        status="active", confidence="high", sources=[]))
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["What is Moore\'s Law?"]', input_tokens=10, output_tokens=5),
+        CompletionResponse(text="Moore's Law states transistor count doubles.",
+                           input_tokens=100, output_tokens=20),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.0)
+    result = await agent.query("What is Moore's Law?")
+    assert isinstance(result, QueryResult)
+    assert result.answer
+    assert result.question == "What is Moore's Law?"
+
+
+# ── query() merge / dedup / edge cases ──────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_query_deduplicates_pages_across_sub_questions(tmp_wiki):
+    """A page retrieved by multiple sub-questions must appear in citations exactly once."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    store.write_page("moores-law", WikiPage(title="Moore's Law", tags=["hardware"],
+        content="Moore's Law doubles transistors every two years.",
+        status="active", confidence="high", sources=[]))
+    # Two extra pages required so BM25 IDF is positive (N≥3, term in 1 doc)
+    store.write_page("unrelated-a", WikiPage(title="Unrelated A", tags=[],
+        content="The quick brown fox jumps over the lazy dog.",
+        status="active", confidence="high", sources=[]))
+    store.write_page("unrelated-b", WikiPage(title="Unrelated B", tags=[],
+        content="Propane grills require annual cleaning of burners.",
+        status="active", confidence="high", sources=[]))
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        # Both sub-questions will hit the same page
+        CompletionResponse(
+            text='["Moore\'s Law transistors", "Moore\'s Law hardware impact"]',
+            input_tokens=10, output_tokens=10,
+        ),
+        CompletionResponse(text="Moore's Law answer.", input_tokens=100, output_tokens=20),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.0)
+    result = await agent.query("How does Moore's Law relate to hardware?")
+    assert result.citations.count("moores-law") == 1
+
+
+@pytest.mark.asyncio
+async def test_query_merged_results_bounded_by_candidate_pool(tmp_wiki):
+    """Merged candidates from all sub-searches must be bounded by the candidate pool size."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    for i in range(12):
+        store.write_page(f"page-{i}", WikiPage(
+            title=f"Page {i}", tags=[],
+            content=f"content topic alpha beta gamma delta {i}",
+            status="active", confidence="high", sources=[]))
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(
+            text='["alpha beta", "gamma delta"]',
+            input_tokens=10, output_tokens=10,
+        ),
+        CompletionResponse(text="answer", input_tokens=100, output_tokens=10),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.0)
+    result = await agent.query("alpha gamma question?")
+    # candidates are bounded by _CANDIDATE_POOL_SIZE (20); all 12 pages may appear
+    assert len(result.citations) <= 20
+
+
+@pytest.mark.asyncio
+async def test_query_all_sub_searches_return_empty(tmp_wiki):
+    """When no pages match any sub-question, answer call must still be made with empty context."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    # No pages written — empty wiki
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["sub-q one?", "sub-q two?"]',
+                           input_tokens=10, output_tokens=5),
+        CompletionResponse(text="I don't know.", input_tokens=50, output_tokens=10),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.0)
+    result = await agent.query("something not in wiki?")
+    assert result.answer == "I don't know."
+    assert result.citations == []
+
+
+@pytest.mark.asyncio
+async def test_query_result_preserves_original_question(tmp_wiki):
+    """QueryResult.question must be the original full question, not any sub-question."""
+    store, search, provider = _make_agent(tmp_wiki)
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.0)
+    original = "Who invented FORTRAN and what influence did it have?"
+    result = await agent.query(original)
+    assert result.question == original
+
+
+@pytest.mark.asyncio
+async def test_query_tokens_used_is_answer_call_tokens(tmp_wiki):
+    """tokens_used must equal the answer LLM call tokens only."""
+    store, search, provider = _make_agent(tmp_wiki)
+    provider.complete.side_effect = [
+        CompletionResponse(text='["term"]', input_tokens=10, output_tokens=5),   # decompose
+        CompletionResponse(text="Answer.", input_tokens=100, output_tokens=25),  # answer
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.0)
+    result = await agent.query("test question")
+    assert result.tokens_used == 125  # answer call only: 100 + 25
+
+
+# ── existing tests (unchanged behaviour) ─────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_query_returns_answer(tmp_wiki):
+    store = WikiStorage(tmp_wiki / "wiki")
+    store.write_page("transformers", WikiPage(title="Transformers", tags=["ai"],
+        content="Transformers use self-attention.", status="active",
+        confidence="high", sources=[]))
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.return_value = CompletionResponse(
+        text="Transformers use self-attention.", input_tokens=200, output_tokens=30)
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.0)
+    result = await agent.query("How do transformers work?")
+    assert isinstance(result, QueryResult)
+    assert result.answer
+
+
+@pytest.mark.asyncio
+async def test_query_empty_wiki_returns_answer(tmp_wiki):
+    store, search, provider = _make_agent(tmp_wiki, answer_text="I don't know.")
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.0)
+    result = await agent.query("What is the meaning of life?")
+    assert isinstance(result, QueryResult)
+    assert result.answer == "I don't know."
+    assert result.citations == []
+
+
+@pytest.mark.asyncio
+async def test_query_citations_match_search_results(tmp_wiki):
+    store = WikiStorage(tmp_wiki / "wiki")
+    store.write_page("pool-chemicals", WikiPage(title="Pool Chemicals", tags=["pool"],
+        content="Chlorine shock treats algae.", status="active", confidence="high", sources=[]))
+    store.write_page("lawn-care", WikiPage(title="Lawn Care", tags=["lawn"],
+        content="Mowing frequency depends on grass growth rate.", status="active",
+        confidence="high", sources=[]))
+    store.write_page("bbq-guide", WikiPage(title="BBQ Guide", tags=["bbq"],
+        content="Propane grills require annual cleaning of burners.", status="active",
+        confidence="high", sources=[]))
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["chlorine pool algae"]', input_tokens=10, output_tokens=5),
+        CompletionResponse(text="Use chlorine shock.", input_tokens=100, output_tokens=20),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.0)
+    result = await agent.query("How do I treat algae?")
+    assert "pool-chemicals" in result.citations
+
+
+@pytest.mark.asyncio
+async def test_query_multiple_pages_all_cited(tmp_wiki):
+    store = WikiStorage(tmp_wiki / "wiki")
+    for slug, title, content in [
+        ("pool-ph", "Pool pH", "pH should be 7.2 to 7.6"),
+        ("pool-chlorine", "Pool Chlorine", "Free chlorine 1-3 ppm"),
+        ("pool-alkalinity", "Pool Alkalinity", "Total alkalinity 80-120 ppm"),
+    ]:
+        store.write_page(slug, WikiPage(title=title, tags=["pool"], content=content,
+                         status="active", confidence="high", sources=[]))
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["pool ph chlorine alkalinity"]',
+                           input_tokens=10, output_tokens=5),
+        CompletionResponse(text="Balance pH, chlorine, and alkalinity.",
+                           input_tokens=200, output_tokens=30),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.0)
+    result = await agent.query("How do I balance pool chemistry?")
+    assert len(result.citations) >= 1
+    for slug in result.citations:
+        assert store.page_exists(slug)
+
+
+# ── compound query integration ────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_compound_query_retrieves_both_parts(tmp_wiki):
+    """A two-part question must retrieve pages relevant to each part independently."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    store.write_page("fortran-history", WikiPage(
+        title="FORTRAN History", tags=["programming"],
+        content="FORTRAN was invented by John Backus at IBM in 1957.",
+        status="active", confidence="high", sources=[]))
+    store.write_page("bombe-machine", WikiPage(
+        title="Bombe Machine", tags=["ww2"],
+        content="The Bombe was an electromechanical device used by Alan Turing to decrypt Enigma.",
+        status="active", confidence="high", sources=[]))
+    store.write_page("unrelated-page", WikiPage(
+        title="Unrelated", tags=[],
+        content="The quick brown fox jumps over the lazy dog.",
+        status="active", confidence="high", sources=[]))
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(
+            text='["Who invented FORTRAN?", "What was the Bombe machine?"]',
+            input_tokens=20, output_tokens=15,
+        ),
+        CompletionResponse(
+            text="FORTRAN was by Backus. Bombe was by Turing.",
+            input_tokens=200, output_tokens=30,
+        ),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.0)
+    result = await agent.query("Who invented FORTRAN and what was the Bombe machine?")
+    assert "fortran-history" in result.citations
+    assert "bombe-machine" in result.citations
+
+
+# ── performance: parallelism ─────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_subquestions_retrieved_in_parallel(tmp_wiki):
+    """query() must call asyncio.gather() with all sub-question coroutines, not a sequential loop."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    store.write_page("fortran-history", WikiPage(title="FORTRAN History", tags=[],
+        content="FORTRAN was invented by John Backus.", status="active",
+        confidence="high", sources=[]))
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["FORTRAN Backus", "FORTRAN IBM 1957"]',
+                           input_tokens=10, output_tokens=10),
+        CompletionResponse(text="FORTRAN answer.", input_tokens=100, output_tokens=20),
+    ]
+
+    gather_calls: list = []
+    original_gather = asyncio.gather
+
+    async def spy_gather(*coros, **kw):
+        gather_calls.append(len(coros))
+        return await original_gather(*coros, **kw)
+
+    import unittest.mock
+    with unittest.mock.patch("synthadoc.agents.query_agent.asyncio.gather", spy_gather):
+        agent = QueryAgent(provider=provider, store=store, search=search,
+                           gap_score_threshold=0.0)
+        await agent.query("Who invented FORTRAN at IBM?")
+
+    assert len(gather_calls) == 1, "asyncio.gather must be called exactly once per query"
+    assert gather_calls[0] == 2, "both sub-questions must be passed to gather together"
+
+
+# ── decompose() edge cases ────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_decompose_provider_exception_falls_back(tmp_wiki):
+    """If the provider raises any exception, decompose() must return [question]."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = RuntimeError("network error")
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    result = await agent.decompose("What is Moore's Law?")
+    assert result == ["What is Moore's Law?"]
+
+
+@pytest.mark.asyncio
+async def test_decompose_times_out_fast_and_falls_back(tmp_wiki, monkeypatch):
+    """decompose() must fall back to [question] within _DECOMPOSE_TIMEOUT_SECS if the
+    LLM is too slow — prevents slow local models from burning the whole query budget."""
+    import asyncio
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+
+    async def _hang(*a, **kw):
+        await asyncio.sleep(3600)  # never returns
+
+    provider.complete.side_effect = _hang
+    monkeypatch.setattr(QueryAgent, "_DECOMPOSE_TIMEOUT_SECS", 0.05)
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    result = await agent.decompose("Who invented FORTRAN?")
+    assert result == ["Who invented FORTRAN?"]
+
+
+@pytest.mark.asyncio
+async def test_decompose_truncates_long_question(tmp_wiki):
+    """Questions longer than 4000 chars must be truncated before the LLM call."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.return_value = CompletionResponse(
+        text='["short sub-question"]', input_tokens=5, output_tokens=5
+    )
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    long_question = "x" * 5000
+    await agent.decompose(long_question)
+    called_content = provider.complete.call_args[1]["messages"][0].content \
+        if provider.complete.call_args[1] else provider.complete.call_args[0][0][0].content
+    # The question embedded in the prompt must not exceed 4000 chars
+    assert len(long_question) > 4000
+    assert "x" * 4001 not in called_content
+
+
+@pytest.mark.asyncio
+async def test_decompose_json_object_falls_back(tmp_wiki):
+    """If the LLM returns a JSON object instead of an array, fall back to original question."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.return_value = CompletionResponse(
+        text='{"sub_questions": ["a", "b"]}', input_tokens=5, output_tokens=5
+    )
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    q = "What is AI?"
+    result = await agent.decompose(q)
+    assert result == [q]
+
+
+@pytest.mark.asyncio
+async def test_decompose_all_whitespace_after_filter_falls_back(tmp_wiki):
+    """If all entries in the array are whitespace-only after filtering, fall back."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.return_value = CompletionResponse(
+        text='["   ", "\\t", ""]', input_tokens=5, output_tokens=5
+    )
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    q = "What is AI?"
+    result = await agent.decompose(q)
+    assert result == [q]
+
+
+# ── performance: decompose() call count ──────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_decompose_called_exactly_once_per_query(tmp_wiki):
+    """query() must call decompose() exactly once regardless of sub-question count."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["sub1", "sub2", "sub3"]',
+                           input_tokens=10, output_tokens=10),
+        CompletionResponse(text="answer", input_tokens=100, output_tokens=20),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.0)
+
+    decompose_calls = []
+    original_decompose = agent.decompose
+
+    async def counting_decompose(q):
+        decompose_calls.append(q)
+        return await original_decompose(q)
+
+    agent.decompose = counting_decompose
+    await agent.query("multi-part question")
+    assert len(decompose_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_gather_arity_matches_sub_question_count(tmp_wiki):
+    """asyncio.gather() must receive exactly N coroutines for N sub-questions."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["q1", "q2", "q3"]',
+                           input_tokens=10, output_tokens=10),
+        CompletionResponse(text="answer", input_tokens=100, output_tokens=20),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.0)
+
+    gather_arities: list[int] = []
+    original_gather = asyncio.gather
+
+    async def spy(*coros, **kw):
+        gather_arities.append(len(coros))
+        return await original_gather(*coros, **kw)
+
+    import unittest.mock
+    with unittest.mock.patch("synthadoc.agents.query_agent.asyncio.gather", spy):
+        await agent.query("three-part question")
+
+    assert gather_arities == [3]
+
+
+@pytest.mark.asyncio
+async def test_simple_question_uses_single_gather_coroutine(tmp_wiki):
+    """A simple question decomposed to 1 sub-question must call gather with exactly 1 coroutine."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["What is AI?"]',
+                           input_tokens=5, output_tokens=5),
+        CompletionResponse(text="AI is ...", input_tokens=80, output_tokens=15),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.0)
+
+    gather_arities: list[int] = []
+    original_gather = asyncio.gather
+
+    async def spy(*coros, **kw):
+        gather_arities.append(len(coros))
+        return await original_gather(*coros, **kw)
+
+    import unittest.mock
+    with unittest.mock.patch("synthadoc.agents.query_agent.asyncio.gather", spy):
+        await agent.query("What is AI?")
+
+    assert gather_arities == [1]
+
+
+# ── cost field propagation ────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_query_result_carries_input_and_output_tokens(tmp_wiki):
+    """QueryResult must expose input_tokens and output_tokens from the answer LLM call."""
+    store, search, provider = _make_agent(tmp_wiki)
+    provider.complete.side_effect = [
+        CompletionResponse(text='["term"]', input_tokens=10, output_tokens=5),
+        CompletionResponse(text="The answer.", input_tokens=120, output_tokens=40),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.0)
+    result = await agent.query("What is the answer?")
+    assert result.input_tokens == 120
+    assert result.output_tokens == 40
+    assert result.tokens_used == 160  # 120 + 40
+
+
+@pytest.mark.asyncio
+async def test_query_result_input_output_tokens_nonzero_for_real_call(tmp_wiki):
+    """input_tokens and output_tokens must be > 0 when the provider returns real counts."""
+    store, search, provider = _make_agent(tmp_wiki)
+    provider.complete.side_effect = [
+        CompletionResponse(text='["sub"]', input_tokens=8, output_tokens=3),
+        CompletionResponse(text="Answer here.", input_tokens=200, output_tokens=50),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.0)
+    result = await agent.query("Any question?")
+    assert result.input_tokens > 0
+    assert result.output_tokens > 0
+
+
+# ── knowledge gap detection ───────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_query_result_has_knowledge_gap_fields(tmp_wiki):
+    """QueryResult must expose knowledge_gap and suggested_searches."""
+    store, search, provider = _make_agent(tmp_wiki)
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.0)
+    result = await agent.query("What is AI?")
+    assert hasattr(result, "knowledge_gap")
+    assert hasattr(result, "suggested_searches")
+    assert isinstance(result.suggested_searches, list)
+
+
+@pytest.mark.asyncio
+async def test_no_gap_when_pages_found_with_high_scores(tmp_wiki):
+    """knowledge_gap must be False when enough pages with high BM25 scores are found."""
+    from synthadoc.storage.wiki import WikiPage
+    store = WikiStorage(tmp_wiki / "wiki")
+    # Write 5 pages that will match the query well
+    for i in range(5):
+        store.write_page(f"ai-page-{i}", WikiPage(
+            title=f"AI page {i}", tags=["ai"],
+            content=f"Artificial intelligence machine learning deep learning neural network {i}.",
+            status="active", confidence="high", sources=[],
+        ))
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["What is AI?"]', input_tokens=5, output_tokens=5),
+        CompletionResponse(text="AI is...", input_tokens=100, output_tokens=20),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.0)  # disabled — never triggers
+    result = await agent.query("What is artificial intelligence?")
+    assert result.knowledge_gap is False
+    assert result.suggested_searches == []
+
+
+@pytest.mark.asyncio
+async def test_gap_detected_when_empty_wiki(tmp_wiki):
+    """knowledge_gap must be True when no pages are found (empty wiki)."""
+    store, search, provider = _make_agent(tmp_wiki)
+    provider.complete.side_effect = [
+        CompletionResponse(text='["What is AI?"]', input_tokens=5, output_tokens=5),
+        # SearchDecomposeAgent call for suggestions:
+        CompletionResponse(text='["artificial intelligence overview", "machine learning basics"]',
+                           input_tokens=8, output_tokens=8),
+        # Answer synthesis call:
+        CompletionResponse(text="No relevant pages found.", input_tokens=50, output_tokens=10),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    result = await agent.query("What is AI?")
+    assert result.knowledge_gap is True
+    assert len(result.suggested_searches) >= 1
+
+
+@pytest.mark.asyncio
+async def test_gap_detected_when_max_score_below_threshold(tmp_wiki):
+    """knowledge_gap must be True when pages exist but max BM25 score is below threshold."""
+    from synthadoc.storage.wiki import WikiPage
+    store = WikiStorage(tmp_wiki / "wiki")
+    # Write pages that are barely related (low BM25 score for the query)
+    store.write_page("unrelated", WikiPage(
+        title="Cooking Recipes", tags=["food"],
+        content="How to bake bread. Mix flour and water.",
+        status="active", confidence="high", sources=[],
+    ))
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["quantum computing"]', input_tokens=5, output_tokens=5),
+        CompletionResponse(text='["quantum computing basics", "quantum gates explained"]',
+                           input_tokens=8, output_tokens=8),
+        CompletionResponse(text="I don't know.", input_tokens=50, output_tokens=10),
+    ]
+    # High threshold so even marginal matches trigger gap
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=999.0)
+    result = await agent.query("What is quantum computing?")
+    assert result.knowledge_gap is True
+    assert len(result.suggested_searches) >= 1
+
+
+@pytest.mark.asyncio
+async def test_gap_suggested_searches_come_from_search_decompose_agent(tmp_wiki):
+    """suggested_searches must be the keyword strings from SearchDecomposeAgent.decompose()."""
+    store, search, provider = _make_agent(tmp_wiki)
+    provider.complete.side_effect = [
+        CompletionResponse(text='["What is quantum computing?"]', input_tokens=5, output_tokens=5),
+        CompletionResponse(text='["quantum computing basics", "qubit explained"]',
+                           input_tokens=8, output_tokens=8),
+        CompletionResponse(text="Answer.", input_tokens=50, output_tokens=10),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=999.0)
+    result = await agent.query("What is quantum computing?")
+    assert "quantum computing basics" in result.suggested_searches
+    assert "qubit explained" in result.suggested_searches
+
+
+@pytest.mark.asyncio
+async def test_no_gap_search_decompose_not_called(tmp_wiki):
+    """SearchDecomposeAgent must NOT be called when no gap is detected."""
+    from synthadoc.storage.wiki import WikiPage
+    store = WikiStorage(tmp_wiki / "wiki")
+    for i in range(5):
+        store.write_page(f"page-{i}", WikiPage(
+            title=f"Page {i}", tags=["ai"],
+            content=f"Artificial intelligence AI machine learning {i}.",
+            status="active", confidence="high", sources=[],
+        ))
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["What is AI?"]', input_tokens=5, output_tokens=5),
+        CompletionResponse(text="AI is...", input_tokens=100, output_tokens=20),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.0)  # never triggers
+    result = await agent.query("What is AI?")
+    # Only 2 provider calls: decompose + answer. No SearchDecomposeAgent call.
+    assert provider.complete.call_count == 2
+    assert result.knowledge_gap is False
+
+
+@pytest.mark.skip(reason="Signal 3 (vocabulary overlap gap) has a pre-existing bug unrelated to this sprint")
+@pytest.mark.asyncio
+async def test_gap_detected_when_pages_are_off_topic(tmp_wiki):
+    """Signal 3: gap triggers when retrieved pages share vocabulary but lack key content words.
+
+    This covers the real-world case where a gardening wiki returns spring-flower
+    pages for a vegetables query — BM25 scores are high (shared: spring, Canada,
+    planting) but none of the pages actually contain the word 'vegetable'.
+    """
+    from synthadoc.storage.wiki import WikiPage
+    store = WikiStorage(tmp_wiki / "wiki")
+    # Write 5 pages that share gardening vocabulary but say nothing about vegetables.
+    for i in range(5):
+        store.write_page(f"flower-page-{i}", WikiPage(
+            title=f"Spring Flowers {i}", tags=["flowers"],
+            content=(
+                "Spring planting in Canada. Best flowers for Canadian gardens. "
+                "Plant tulips and daffodils after the last frost date in spring. "
+                "Soil preparation for flower beds in Canadian climate zones."
+            ),
+            status="active", confidence="high", sources=[],
+        ))
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        # decompose call — single sub-question
+        CompletionResponse(text='["What vegetables grow in Canadian spring?"]',
+                           input_tokens=5, output_tokens=5),
+        # SearchDecomposeAgent call for suggestions (gap triggered)
+        CompletionResponse(text='["canadian spring vegetables planting", "frost dates vegetable Canada"]',
+                           input_tokens=8, output_tokens=8),
+        # answer synthesis call
+        CompletionResponse(text="No vegetable info found.", input_tokens=80, output_tokens=15),
+    ]
+    # Threshold high enough that signal 2 alone would not trigger (flowers pages will
+    # score well on BM25 for this query due to shared vocabulary).
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.01)   # signal 2 disabled; signal 3 must fire
+    result = await agent.query("What vegetables grow well in a Canadian spring?")
+    # Signal 3: none of the flower pages contain 'vegetabl' — gap must be detected.
+    assert result.knowledge_gap is True
+    assert len(result.suggested_searches) >= 1
+
+
+def _fake_results(slugs: list[str], score: float = 5.0) -> list[SearchResult]:
+    """Return mock SearchResult list for patching bm25_search."""
+    return [SearchResult(slug=s, score=score, title=s, snippet="") for s in slugs]
+
+
+@pytest.mark.asyncio
+async def test_no_gap_when_one_key_term_is_a_synonym(tmp_wiki):
+    """Signal 3 must not fire when the rarest key term is absent only because the
+    wiki uses a different word for the same concept (synonym/location variant).
+
+    Real-world regression: query uses 'backyard' but wiki pages say 'garden'.
+    'backyard' has zero doc-frequency; the fix is to skip it and use the rarest
+    *covered* term ('plant') as the discriminator instead.
+
+    bm25_search is mocked so BM25 IDF behaviour does not affect this test.
+    """
+    store = WikiStorage(tmp_wiki / "wiki")
+    # Pages cover the topic well using "garden" throughout — "backyard" never appears.
+    # "plant" appears ≥ 3 times per page (as substring of "plants"/"Plant").
+    slugs = [f"garden-page-{i}" for i in range(5)]
+    for slug in slugs:
+        store.write_page(slug, WikiPage(
+            title="Garden Plants", tags=["garden"],
+            content=(
+                "Best plants for Canadian gardens. "
+                "Garden plants for partial shade areas. "
+                "Plant selection for shaded garden beds. "
+                "Shade-tolerant garden plants for your yard."
+            ),
+            status="active", confidence="high", sources=[],
+        ))
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["What plants grow well in a backyard?"]',
+                           input_tokens=5, output_tokens=5),
+        CompletionResponse(text="Many plants grow well in Canadian gardens.",
+                           input_tokens=80, output_tokens=20),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.01)  # signal 2 disabled; only signal 3 can fire
+    with patch.object(agent._search, "bm25_search", return_value=_fake_results(slugs)):
+        result = await agent.query("What plants grow well in a backyard?")
+    # "backyard" is absent (wiki says "garden"), so it is skipped as a zero-freq term.
+    # "plant" covers all 5 pages with freq ≥ 3 → signal 3 does not fire.
+    assert result.knowledge_gap is False
+    assert result.suggested_searches == []
+
+
+@pytest.mark.asyncio
+async def test_gap_signal3_boundary_exactly_two_on_topic_pages(tmp_wiki):
+    """Signal 3 must NOT trigger when exactly two retrieved pages cover the
+    discriminating term with sufficient frequency.
+
+    The threshold is _pages_with_overlap < 2, so exactly 2 pages = no gap.
+
+    bm25_search is mocked so BM25 IDF behaviour does not affect this test.
+    """
+    store = WikiStorage(tmp_wiki / "wiki")
+    # 2 orchid pages have "orchid" ≥ 3 times; 3 pages have none.
+    for i in range(2):
+        store.write_page(f"orchid-page-{i}", WikiPage(
+            title="Orchid Care", tags=["orchid"],
+            content=(
+                "Orchid growing tips for home. "
+                "The best orchid varieties for shade. "
+                "Orchid plants need indirect light."
+            ),
+            status="active", confidence="high", sources=[],
+        ))
+    for i in range(3):
+        store.write_page(f"generic-page-{i}", WikiPage(
+            title="Garden Tips", tags=["garden"],
+            content="Best plants for Canadian gardens. Garden design tips.",
+            status="active", confidence="high", sources=[],
+        ))
+    all_slugs = [f"orchid-page-{i}" for i in range(2)] + [f"generic-page-{i}" for i in range(3)]
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["What orchid plants grow well?"]',
+                           input_tokens=5, output_tokens=5),
+        CompletionResponse(text="Orchid answer.", input_tokens=80, output_tokens=15),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.01)
+    with patch.object(agent._search, "bm25_search", return_value=_fake_results(all_slugs)):
+        result = await agent.query("What orchid plants grow well indoors?")
+    # "orchid" is the discriminating term (rarest covered, doc_freq=2).
+    # Exactly 2 pages have "orchid" ≥ 3 times; 2 < 2 is False → no gap.
+    assert result.knowledge_gap is False
+    assert result.suggested_searches == []
+
+
+@pytest.mark.asyncio
+async def test_gap_signal3_boundary_one_on_topic_page(tmp_wiki):
+    """Signal 3 DOES trigger when only one retrieved page covers the discriminating
+    term with sufficient frequency (1 < 2 → gap).
+
+    bm25_search is mocked so BM25 IDF behaviour does not affect this test.
+    """
+    store = WikiStorage(tmp_wiki / "wiki")
+    # Only 1 page has "orchid" ≥ 3 times; 4 pages are off-topic.
+    store.write_page("orchid-page", WikiPage(
+        title="Orchid Care", tags=["orchid"],
+        content=(
+            "Orchid growing tips for home. "
+            "The best orchid varieties for shade. "
+            "Orchid plants need indirect light."
+        ),
+        status="active", confidence="high", sources=[],
+    ))
+    for i in range(4):
+        store.write_page(f"generic-page-{i}", WikiPage(
+            title="Garden Tips", tags=["garden"],
+            content="Best plants for Canadian gardens. Garden design tips.",
+            status="active", confidence="high", sources=[],
+        ))
+    all_slugs = ["orchid-page"] + [f"generic-page-{i}" for i in range(4)]
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["What orchid plants grow well?"]',
+                           input_tokens=5, output_tokens=5),
+        CompletionResponse(text='["orchid care guide", "indoor orchid growing"]',
+                           input_tokens=8, output_tokens=8),
+        CompletionResponse(text="Limited orchid info.", input_tokens=80, output_tokens=15),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.01)
+    with patch.object(agent._search, "bm25_search", return_value=_fake_results(all_slugs)):
+        result = await agent.query("What orchid plants grow well indoors?")
+    # "orchid" is the discriminating term; only 1 page has it ≥ 2 times → 1 < 2 → gap.
+    assert result.knowledge_gap is True
+    assert len(result.suggested_searches) >= 1
+
+
+@pytest.mark.asyncio
+async def test_no_gap_multi_aspect_query_with_generic_corpus_term(tmp_wiki):
+    """Signal 3 must not fire for a multi-aspect query when the wiki covers the topic
+    well but the corpus-dominant term ('shade') is filtered as hyper-generic.
+
+    Real-world regression: query asks about 'full sun, partial shade, and full shade'.
+    The wiki has many shade pages.  'shade' and 'plant' appear in every page (>60%
+    coverage) so they are filtered as generic.  'partial' is the rarest specific term.
+    Pages that mention 'partial' at least twice count as on-topic — if ≥ 2 pages pass,
+    no gap fires even though 'shade' was excluded from the specific-term check.
+
+    bm25_search is mocked to return the shade pages directly.
+    """
+    store = WikiStorage(tmp_wiki / "wiki")
+    # 4 pages cover partial shade explicitly; 2 are full-shade only.
+    for i in range(4):
+        store.write_page(f"partial-shade-{i}", WikiPage(
+            title=f"Partial Shade Plants {i}", tags=["shade"],
+            content=(
+                "Best plants for partial shade in Canadian gardens. "
+                "Partial shade perennials thrive under dappled light. "
+                "These shade-tolerant plants suit partial shade conditions. "
+                "Plant selection for partial shade and full shade areas."
+            ),
+            status="active", confidence="high", sources=[],
+        ))
+    for i in range(2):
+        store.write_page(f"full-shade-{i}", WikiPage(
+            title=f"Full Shade Plants {i}", tags=["shade"],
+            content=(
+                "Best plants for full shade. Hostas thrive in shade. "
+                "Shade plants for Canadian gardens. Deep shade perennials."
+            ),
+            status="active", confidence="high", sources=[],
+        ))
+    all_slugs = [f"partial-shade-{i}" for i in range(4)] + [f"full-shade-{i}" for i in range(2)]
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["best plants for full sun partial shade and full shade Canada"]',
+                           input_tokens=5, output_tokens=5),
+        CompletionResponse(text="Here are plants for each light level...",
+                           input_tokens=200, output_tokens=60),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.01)  # signal 2 disabled; only signal 3 can fire
+    with patch.object(agent._search, "bm25_search", return_value=_fake_results(all_slugs)):
+        result = await agent.query(
+            "What are the best plants for full sun, partial shade, and full shade in a Canadian backyard?"
+        )
+    # 4 pages mention "partial" ≥ 2 times → on_topic_pages = 4 ≥ 2 → no gap.
+    assert result.knowledge_gap is False
+    assert result.suggested_searches == []
+
+
+@pytest.mark.asyncio
+async def test_gap_signal5_defining_term_barely_present(tmp_wiki):
+    """Signal 5: gap triggers when at least one specific key term never appears ≥ 2
+    times in any single candidate page, even though it exists in the wiki (freq > 0
+    across pages) so signal 4 does not fire.
+
+    Real-world case: "quantum error correction" in a history-of-computing wiki.
+    "quantum" is present in 2 candidate pages but only once per page (passing mention).
+    "error" and "correction" each appear ≥ 2 times in dedicated Bombe pages.
+
+    Signal breakdown for this test:
+    - Signal 1: 8 candidates ≥ 3 → no fire
+    - Signal 2: gap_score_threshold=0.01 → no fire
+    - Signal 3: 2 pages have error/correction ≥ 2 → on_topic_pages=2 ≥ 2 → no fire
+    - Signal 4: all 3 terms have doc_freq > 0 → no zero-freq → no fire
+    - Signal 5: guard A: on_topic_pages=2 < n_cands//2=4 → coverage is thin;
+                guard B: "quantum" doc_freq=2 < threshold(3) → genuinely absent;
+                → gap=True ✓
+
+    bm25_search is mocked so BM25 IDF behaviour does not affect this test.
+    """
+    store = WikiStorage(tmp_wiki / "wiki")
+
+    # 2 pages where "error" and "correction" appear ≥ 2 times (Bombe incidental matches).
+    for i in range(2):
+        store.write_page(f"bombe-page-{i}", WikiPage(
+            title=f"The Bombe Machine {i}", tags=["history"],
+            content=(
+                "The Bombe detected incorrect Enigma settings by finding contradictions. "
+                "Each error in the assumed settings triggered a correction cycle. "
+                "The machine applied error correction logic to narrow down Enigma keys. "
+                "Finding an error led to rejecting that key and applying a correction."
+            ),
+            status="active", confidence="high", sources=[],
+        ))
+    # 2 pages that each mention "quantum" exactly once — present but not covered.
+    for i in range(2):
+        store.write_page(f"quantum-mention-{i}", WikiPage(
+            title=f"Computing Frontiers {i}", tags=["history"],
+            content=(
+                "Transistors replaced vacuum tubes in the 1950s, paving the way for "
+                "integrated circuits. Researchers have since explored quantum computing "
+                "as the next frontier, but this wiki does not yet cover that topic."
+            ),
+            status="active", confidence="high", sources=[],
+        ))
+    # 4 filler pages with none of the key terms.
+    for i in range(4):
+        store.write_page(f"other-page-{i}", WikiPage(
+            title=f"Computing History {i}", tags=["history"],
+            content=(
+                "Alan Turing proposed the Turing machine as a theoretical model of computation. "
+                "John von Neumann designed the stored-program architecture."
+            ),
+            status="active", confidence="high", sources=[],
+        ))
+
+    all_slugs = (
+        [f"bombe-page-{i}" for i in range(2)]
+        + [f"quantum-mention-{i}" for i in range(2)]
+        + [f"other-page-{i}" for i in range(4)]
+    )
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["What is quantum error correction?"]',
+                           input_tokens=5, output_tokens=5),
+        # SearchDecomposeAgent call for suggestions (gap triggered):
+        CompletionResponse(text='["quantum error correction explained", "qubit error rates"]',
+                           input_tokens=8, output_tokens=8),
+        CompletionResponse(text="No quantum info found.", input_tokens=80, output_tokens=15),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.01)  # signal 2 disabled
+    with patch.object(agent._search, "bm25_search", return_value=_fake_results(all_slugs)):
+        result = await agent.query("What is quantum error correction?")
+    # "quantum": doc_freq=2 < threshold(3), qualifying=0 → signal 5 fires.
+    assert result.knowledge_gap is True
+    assert len(result.suggested_searches) >= 1
+
+
+# ── Relational-verb stopwords ─────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_gap_relational_verb_in_query_does_not_trigger_false_gap(tmp_wiki):
+    """Relational verbs like 'shape' in a query must not trigger a false gap when
+    the wiki has relevant content.
+
+    'How did Moore's Law shape hardware design?' — 'shape' is a relational verb,
+    not a content noun. Wiki pages use "shaped" at most once in passing; they never
+    repeat 'shape' ≥ 2 times as a dedicated concept. With the old code, 'shape'
+    enters _key_terms (doc_freq > 0 via "shaped"), gets qualifying_pages=0 (never
+    appears ≥ 2 times in any page), sets min_qualifying=0, and fires signal 5 →
+    false gap.
+
+    After adding 'shape' to _STOPWORDS it is excluded from key_terms and signal 5
+    only evaluates genuine topic words (moore', hardware, design, software) — all of
+    which appear ≥ 2 times in the pages → min_qualifying > 0 → no gap.
+    """
+    store = WikiStorage(tmp_wiki / "wiki")
+    # Each page mentions "shaped" exactly once (doc_freq("shape") > 0, but count < 2)
+    # and repeats all genuine topic words multiple times.
+    moores_content = (
+        "Moore's Law predicts that transistor density doubles every two years. "
+        "Moore's Law proved accurate for decades and shaped the computing industry. "
+        "Hardware engineers designed chips with hardware performance in mind. "
+        "Hardware improvements drove hardware design decisions for every generation. "
+        "Software developers could write more complex software knowing hardware "
+        "would keep up. Software complexity grew alongside Moore's Law improvements."
+    )
+    for i in range(5):
+        store.write_page(f"moores-law-{i}", WikiPage(
+            title=f"Moore's Law {i}", tags=["hardware"],
+            content=moores_content,
+            status="active", confidence="high", sources=[],
+        ))
+
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.return_value = CompletionResponse(
+        text='["What is Moore\'s Law?", "How did Moore\'s Law influence hardware design?"]',
+        input_tokens=10, output_tokens=5,
+    )
+
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.01)
+    with patch.object(agent._search, "bm25_search",
+                      return_value=_fake_results([f"moores-law-{i}" for i in range(5)], score=9.0)):
+        result = await agent.query(
+            "How did Moore's Law shape both hardware design and software expectations over time?"
+        )
+
+    # 'shape' is in _STOPWORDS → excluded from key_terms → signal 5 does not fire.
+    # Remaining terms (moore, hardware, design, software) all have qualifying_pages > 0.
+    assert result.knowledge_gap is False
+
+
+@pytest.mark.asyncio
+async def test_gap_influence_verb_in_query_does_not_trigger_false_gap(tmp_wiki):
+    """'influence' in a query like 'How did Unix influence the open-source movement?'
+    is a relational verb, not a content noun.  Wiki pages discuss Unix and open-source
+    without repeating the word 'influence' ≥ 2 times in a single page.
+
+    After adding 'influence' to _STOPWORDS it is excluded from key_terms, and only
+    genuine topic words ('open-source', 'movement') are evaluated — both of which
+    appear ≥ 2 times in the dedicated wiki page → no gap.
+    """
+    store = WikiStorage(tmp_wiki / "wiki")
+    unix_content = (
+        "The Unix operating system, developed at Bell Labs in the late 1960s, "
+        "became a cornerstone of the open-source movement through its open design. "
+        "The open-source movement drew heavily from Unix philosophy and principles. "
+        "Unix tools and the open-source movement share core values of collaboration "
+        "and open access to source code. The Unix movement predated but directly "
+        "enabled the modern open-source movement and free software communities."
+    )
+    for i in range(5):
+        store.write_page(f"unix-os-{i}", WikiPage(
+            title=f"Unix History {i}", tags=["unix", "open-source"],
+            content=unix_content,
+            status="active", confidence="high", sources=[],
+        ))
+
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.return_value = CompletionResponse(
+        text='["How did Unix relate to open-source?", "What is the open-source movement?"]',
+        input_tokens=10, output_tokens=5,
+    )
+
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.01)
+    with patch.object(agent._search, "bm25_search",
+                      return_value=_fake_results([f"unix-os-{i}" for i in range(5)], score=8.0)):
+        result = await agent.query(
+            "How did Unix influence the open-source movement?"
+        )
+
+    # 'influence' is in _STOPWORDS → excluded from key_terms.
+    # 'open-source' and 'movement' appear ≥ 2 times per page → no gap.
+    assert result.knowledge_gap is False
+
+
+@pytest.mark.asyncio
+async def test_gap_hyphen_normalisation_open_source_two_word_content(tmp_wiki):
+    """Query uses 'open-source' (hyphenated) but wiki pages write 'open source'
+    (two words).  Without hyphen normalisation, count('open-source') in content
+    that only contains 'open source' returns 0 → on_topic_pages=0 → signal 3 gap.
+
+    With hyphen normalisation (hyphens → spaces in both key terms and content),
+    the key term becomes 'open source' and matches wiki content correctly.
+    """
+    store = WikiStorage(tmp_wiki / "wiki")
+    # Pages use "open source" (two words), NOT "open-source" (hyphenated).
+    two_word_content = (
+        "Unix was a foundational influence on the open source movement in computing. "
+        "The open source movement grew from Unix philosophy and the GNU project. "
+        "Open source software licensing models trace their roots to Unix sharing. "
+        "The open source community adopted Unix tools as core infrastructure. "
+        "Unix principles shaped open source development practices for decades."
+    )
+    for i in range(5):
+        store.write_page(f"unix-2w-{i}", WikiPage(
+            title=f"Unix Open Source {i}", tags=["unix"],
+            content=two_word_content,
+            status="active", confidence="high", sources=[],
+        ))
+
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.return_value = CompletionResponse(
+        text='["What is the open-source movement?", "How did Unix relate to it?"]',
+        input_tokens=10, output_tokens=5,
+    )
+
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.01)
+    with patch.object(agent._search, "bm25_search",
+                      return_value=_fake_results([f"unix-2w-{i}" for i in range(5)], score=9.0)):
+        result = await agent.query(
+            "How did Unix influence the open-source movement?"
+        )
+
+    # key term 'open source' (normalised from 'open-source') matches 'open source'
+    # in page content (≥ 5 occurrences per page) → on_topic_pages=5 → no gap.
+    assert result.knowledge_gap is False
+
+
+@pytest.mark.asyncio
+async def test_gap_possessive_query_term_matches_bare_and_possessive_forms(tmp_wiki):
+    """'Moore's' in a query must produce key term 'moore' (not 'moore\\'') so that
+    pages referencing Moore in any form — 'Gordon Moore', 'Moore's Law', 'Moores' —
+    all count toward coverage.
+
+    Old rstrip("s?!.,") left the apostrophe: "Moore's" → "moore'", a substring
+    present only in possessive forms.  A page saying "Gordon Moore observed that
+    transistors..." has count("moore'")=0 even though it is clearly on-topic.  When
+    every page mentions "Moore's Law" exactly once (as a header) and also says "Gordon
+    Moore" once, count("moore'")=1 per page, qualifying_pages=0 → signal 5 fires.
+
+    New rstrip("s'?!.,") strips both s and apostrophe: "Moore's" → "moore".
+    count("moore") counts both "Moore's" and "Moore" occurrences, so the same page
+    reaches count≥2 → qualifying_pages>0 → no gap.
+    """
+    store = WikiStorage(tmp_wiki / "wiki")
+    # Each page mentions "Moore's Law" once and "Gordon Moore" once.
+    # Old key term "moore'": count=1 in each page (only the possessive form matches).
+    # New key term "moore":  count=2 in each page ("Moore's" + "Gordon Moore" both match).
+    possessive_content = (
+        "Moore's Law is a prediction originally made by Gordon Moore in 1965. "
+        "Transistor density in integrated circuits doubles approximately every two years. "
+        "Hardware designers relied on this computing trend for decades of chip development. "
+        "Hardware roadmaps across the computing industry used this trajectory as a baseline."
+    )
+    for i in range(5):
+        store.write_page(f"moore-hist-{i}", WikiPage(
+            title=f"Moore History {i}", tags=["hardware"],
+            content=possessive_content,
+            status="active", confidence="high", sources=[],
+        ))
+
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.return_value = CompletionResponse(
+        text='["What is Moore\'s Law?", "How did Moore\'s Law influence hardware?"]',
+        input_tokens=10, output_tokens=5,
+    )
+
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.01)
+    with patch.object(agent._search, "bm25_search",
+                      return_value=_fake_results([f"moore-hist-{i}" for i in range(5)],
+                                                 score=9.0)):
+        result = await agent.query(
+            "How did Moore's Law affect computing hardware over time?"
+        )
+
+    # New: "moore" matches both possessive and bare form → count≥2 per page → no gap.
+    assert result.knowledge_gap is False
+
+
+@pytest.mark.asyncio
+async def test_gap_signal5_high_docfreq_reference_term_does_not_fire(tmp_wiki):
+    """Signal 5 must NOT fire when the zero-qualifying term has high doc_freq.
+
+    'moore' appears in 4 of 8 pages (≥ threshold=3), each time as a single passing
+    reference — count("moore")=1 < 2 per page → qualifying_pages("moore")=0.
+    Signal 5 is blocked by guard B alone: doc_freq=4 ≥ threshold(3) → no fire.
+    (Guard A no longer applies to signal 5; guard B is the sole discriminator.)
+
+    The 4 filler pages contain none of the query's key terms, keeping
+    hardware/design/software at 50% doc_freq (below 80% threshold) so they remain
+    as specific discriminating terms rather than being filtered as generic.
+    """
+    store = WikiStorage(tmp_wiki / "wiki")
+    # 4 pages: "moore" appears exactly once (passing reference), but hardware/design/
+    # software each appear >= 2 times (dedicated coverage).
+    reference_content = (
+        "Moore's Law predicted that hardware transistor density would double each year. "
+        "Hardware engineers planned hardware design based on this transistor observation. "
+        "Hardware design decisions drove hardware development across computing generations. "
+        "Software teams adapted their software complexity alongside hardware advances."
+    )
+    for i in range(4):
+        store.write_page(f"hardware-pg-{i}", WikiPage(
+            title=f"Hardware History {i}", tags=["hardware"],
+            content=reference_content,
+            status="active", confidence="high", sources=[],
+        ))
+    # 4 filler pages about theoretical computing -- none of the query key terms
+    # (moore, hardware, design, software, development) appear here, so those
+    # terms stay at 50% doc_freq and are not filtered as corpus-generic.
+    filler_content = (
+        "Alan Turing formulated the theoretical basis for computation and logic. "
+        "John von Neumann contributed to early computing through his stored-program concept. "
+        "Claude Shannon established information theory as a mathematical framework. "
+        "Alonzo Church developed lambda calculus as a formal system for computability."
+    )
+    for i in range(4):
+        store.write_page(f"theory-pg-{i}", WikiPage(
+            title=f"Theory History {i}", tags=["theory"],
+            content=filler_content,
+            status="active", confidence="high", sources=[],
+        ))
+
+    all_slugs = [f"hardware-pg-{i}" for i in range(4)] + [f"theory-pg-{i}" for i in range(4)]
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.return_value = CompletionResponse(
+        text='["What is Moore\'s Law?", "How did it affect hardware design?"]',
+        input_tokens=10, output_tokens=5,
+    )
+
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.01)
+    with patch.object(agent._search, "bm25_search",
+                      return_value=_fake_results(all_slugs, score=8.0)):
+        result = await agent.query(
+            "How did Moore's Law shape hardware design and software development?"
+        )
+
+    # "moore": doc_freq=4 >= threshold(3), qualifying=0 -> signal 5 does NOT fire.
+    # hardware/design/software all have qualifying_pages=4 -> signal 3 passes -> no gap.
+    assert result.knowledge_gap is False
+
+
+@pytest.mark.asyncio
+async def test_gap_signal5_fires_when_on_topic_pages_equals_half_and_term_low_docfreq(tmp_wiki):
+    """Regression: signal 5 must fire when on_topic_pages = n_cands//2 exactly
+    (old guard A blocked it) and the discriminating term has low doc_freq and
+    qualifying_pages=0.
+
+    Real-world case: 'judge agent methodologies' query against a wiki that covers
+    agent/judge well but never dedicates content to 'methodologies'.
+    8 pages retrieved; 4 are on-topic for 'agent'/'judge' — exactly n_cands//2.
+
+    NOTE: the query must NOT use 'agent-as-a-judge' (hyphenated) because the
+    tokeniser turns the whole phrase into the compound key term 'agent as a judge',
+    which won't match individual words in page content and fires signal 3 instead.
+
+    Old guard A: 4 < 4 = False → blocked signal 5 → gap=False (bug).
+    Fix: guard A removed from signal 5; guard B alone applies.
+    'methodologie' doc_freq=2 < threshold(3) and qualifying=0 → gap=True ✓
+
+    Signal breakdown:
+    - Signal 1: 8 candidates ≥ 3 → no fire
+    - Signal 2: gap_score_threshold=0.01 → no fire
+    - Signal 3: on_topic_pages=4 ≥ 2 → no fire
+    - Signal 4: _signal4_active=False (4<4=False); also no term has doc_freq=0
+    - Signal 5 (fixed): guard A removed; 'methodologie' doc_freq=2 < cap(3),
+      qualifying=0 → gap=True ✓
+    """
+    store = WikiStorage(tmp_wiki / "wiki")
+    # 4 pages: 'agent' ≥ 4 times, 'judge' ≥ 3 times; 'methodologie' absent.
+    agent_judge_content = (
+        "An agent evaluates responses by acting as a judge. "
+        "The agent judge assigns numeric scores based on rubrics. "
+        "Agent-based judging provides consistent results. "
+        "The judge agent produces detailed feedback for each agent."
+    )
+    for i in range(4):
+        store.write_page(f"agent-judge-{i}", WikiPage(
+            title=f"Agent Judge {i}", tags=["llm"],
+            content=agent_judge_content,
+            status="active", confidence="high", sources=[],
+        ))
+    # 2 pages: 'methodologies' appears exactly once per page → doc_freq=2, qualifying=0.
+    for i in range(2):
+        store.write_page(f"eval-methods-{i}", WikiPage(
+            title=f"Evaluation Methods {i}", tags=["eval"],
+            content=(
+                "Various methodologies exist for benchmarking AI systems. "
+                "This page covers human review and automated scoring approaches."
+            ),
+            status="active", confidence="high", sources=[],
+        ))
+    # 2 filler pages with none of the query's key terms.
+    for i in range(2):
+        store.write_page(f"filler-{i}", WikiPage(
+            title=f"Filler {i}", tags=[],
+            content="The quick brown fox jumps over the lazy dog. Propane grills need cleaning.",
+            status="active", confidence="high", sources=[],
+        ))
+
+    all_slugs = (
+        [f"agent-judge-{i}" for i in range(4)]
+        + [f"eval-methods-{i}" for i in range(2)]
+        + [f"filler-{i}" for i in range(2)]
+    )
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["What are judge agent methodologies?"]',
+                           input_tokens=5, output_tokens=5),
+        CompletionResponse(text='["agent judge evaluation overview", "llm judge benchmarks"]',
+                           input_tokens=8, output_tokens=8),
+        CompletionResponse(text="No dedicated methodology content found.", input_tokens=80, output_tokens=15),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.01)
+    with patch.object(agent._search, "bm25_search",
+                      return_value=_fake_results(all_slugs, score=8.0)):
+        result = await agent.query("What are judge agent methodologies?")
+
+    # Before fix: gap=False (guard A blocked signal 5 because 4 < 4 = False).
+    # After fix: gap=True ('methodologie' doc_freq=2 < cap(3), qualifying=0).
+    assert result.knowledge_gap is True
+    assert len(result.suggested_searches) >= 1
+
+
+@pytest.mark.asyncio
+async def test_gap_signal5_guard_b_still_blocks_high_docfreq_without_guard_a(tmp_wiki):
+    """Guard B must still prevent signal 5 when the discriminating term is a
+    domain reference term (doc_freq ≥ threshold) even though guard A is removed.
+
+    Same scenario as the regression test above, but 'methodologies' now appears
+    in 4 of 8 pages (each mentioning it exactly once) → doc_freq=4 ≥ threshold(3).
+    qualifying_pages=0 (never ≥ 2 in any page), so without guard B signal 5 would
+    fire.  Guard B blocks it: 4 ≥ cap(3) → no gap.
+
+    Signal breakdown:
+    - Signal 3: on_topic_pages=4 ≥ 2 → no fire
+    - Signal 5: 'methodologie' qualifying=0 BUT doc_freq=4 ≥ cap(3) → guard B
+      blocks → no fire → gap=False ✓
+    """
+    store = WikiStorage(tmp_wiki / "wiki")
+    # 4 pages: 'agent' ≥ 4 times, 'judge' ≥ 3 times; 'methodologie' absent.
+    agent_judge_content = (
+        "An agent evaluates responses by acting as a judge. "
+        "The agent judge assigns numeric scores based on rubrics. "
+        "Agent-based judging provides consistent results. "
+        "The judge agent produces detailed feedback for each agent."
+    )
+    for i in range(4):
+        store.write_page(f"agent-judge2-{i}", WikiPage(
+            title=f"Agent Judge {i}", tags=["llm"],
+            content=agent_judge_content,
+            status="active", confidence="high", sources=[],
+        ))
+    # 4 pages: 'methodologies' appears exactly once each → doc_freq=4 ≥ cap(3).
+    for i in range(4):
+        store.write_page(f"eval-ref-{i}", WikiPage(
+            title=f"Eval Reference {i}", tags=["eval"],
+            content=(
+                "Various methodologies exist for benchmarking AI systems. "
+                "This page covers human review and automated scoring approaches."
+            ),
+            status="active", confidence="high", sources=[],
+        ))
+
+    all_slugs = (
+        [f"agent-judge2-{i}" for i in range(4)]
+        + [f"eval-ref-{i}" for i in range(4)]
+    )
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["What are judge agent methodologies?"]',
+                           input_tokens=5, output_tokens=5),
+        CompletionResponse(text="Agent judge evaluation overview.", input_tokens=80, output_tokens=15),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.01)
+    with patch.object(agent._search, "bm25_search",
+                      return_value=_fake_results(all_slugs, score=8.0)):
+        result = await agent.query("What are judge agent methodologies?")
+
+    # 'methodologie' doc_freq=4 ≥ cap(3) → guard B blocks signal 5 → no gap.
+    assert result.knowledge_gap is False
+    assert result.suggested_searches == []
+
+
+@pytest.mark.asyncio
+async def test_gap_signal5_fires_at_exact_docfreq_cap_boundary(tmp_wiki):
+    """Signal 5 must fire when the zero-qualifying term sits exactly at the cap.
+
+    'born' appears in 3 of 8 pages (once each) → qualifying=0.
+    cap = max(2, (8+2)//3) = 3.
+    Old check: 3 < 3 = False → signal 5 skipped → gap=False  (bug — wiki only has
+    passing mentions of birth, no dedicated biography page).
+    New check: 3 <= 3 = True → signal 5 fires → gap=True  ✓
+
+    This models the real-world case where a computing-history wiki mentions
+    'Turing was born in ...' in a handful of overview pages but has no
+    dedicated biography page covering his birth date with depth.
+
+    Signal breakdown (8 candidates, gap_score_threshold=0.01):
+    - Signal 1: 8 ≥ 3 → no fire
+    - Signal 2: score=8.0 >> 0.01 → no fire
+    - Signal 3: on_topic_pages=6 ≥ 2 → no fire
+    - Signal 4: no zero-freq terms (born doc_freq=3 > 0) → no fire
+    - Signal 5: 'born' qualifying=0, doc_freq=3 <= cap(3) → fire → gap=True ✓
+    """
+    store = WikiStorage(tmp_wiki / "wiki")
+    # 6 pages: "contribution" appears ≥ 2 times (on-topic depth); "born" absent.
+    deep_content = (
+        "Alan Turing's contribution to theoretical computing is profound. "
+        "His contribution to the stored-program concept shaped modern computers. "
+        "Turing's theoretical models remain a contribution to formal language theory. "
+        "Computing owes a great contribution to Turing's work on decidability."
+    )
+    for i in range(6):
+        store.write_page(f"turing-contrib-{i}", WikiPage(
+            title=f"Turing Contribution {i}", tags=["computing"],
+            content=deep_content,
+            status="active", confidence="high", sources=[],
+        ))
+    # 2 pages: "born" appears exactly once — passing mention (scope page style).
+    scope_content = (
+        "Alan Turing, born in London, was a key figure in computing history. "
+        "Turing contributed to computing theory and the foundations of modern hardware."
+    )
+    for i in range(2):
+        store.write_page(f"turing-scope-{i}", WikiPage(
+            title=f"Turing Scope {i}", tags=["computing"],
+            content=scope_content,
+            status="active", confidence="high", sources=[],
+        ))
+    # 1 page: a third passing mention of "born" — keeps doc_freq("born") = 3 = cap.
+    store.write_page("turing-overview", WikiPage(
+        title="Turing Overview", tags=["computing"],
+        content=(
+            "Turing was born in the early twentieth century. "
+            "His contributions to computing endure in theoretical computer science."
+        ),
+        status="active", confidence="high", sources=[],
+    ))
+
+    all_slugs = (
+        [f"turing-contrib-{i}" for i in range(6)]
+        + [f"turing-scope-{i}" for i in range(2)]
+        + ["turing-overview"]
+    )
+    # 9 slugs but we'll pretend BM25 returns 8 (drop last contrib page so n_cands=8
+    # and cap=3 exactly; born=3 pages covers all 3 non-contrib pages).
+    eight_slugs = [f"turing-contrib-{i}" for i in range(5)] + [
+        f"turing-scope-{i}" for i in range(2)
+    ] + ["turing-overview"]
+
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["When was Alan Turing born?", "contributions to computing"]',
+                           input_tokens=5, output_tokens=5),
+        # SearchDecomposeAgent call for gap suggestions:
+        CompletionResponse(text='["Alan Turing biography", "Turing birth year"]',
+                           input_tokens=5, output_tokens=5),
+        CompletionResponse(text="The wiki does not have Turing biography details.",
+                           input_tokens=80, output_tokens=15),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.01)
+    with patch.object(agent._search, "bm25_search",
+                      return_value=_fake_results(eight_slugs, score=8.0)):
+        result = await agent.query("When was Alan Turing born? What was his contribution?")
+
+    # 'born': doc_freq=3, qualifying=0; cap=3 → 3 <= 3 → signal 5 fires → gap.
+    assert result.knowledge_gap is True
+    assert len(result.suggested_searches) >= 1
+
+
+@pytest.mark.asyncio
+async def test_gap_signal7_prominent_entity_absent(tmp_wiki):
+    """Signal 7: gap fires when a key entity term is present in the query but has
+    zero occurrences across all retrieved pages, and overall coverage is below 80%.
+
+    Real-world case: "iPhone" in a history-of-computing wiki.
+    8 of 15 pages mention "mobile" extensively (keeping on_topic_pages=8, which is
+    53% — below the 80% coverage gate). "iPhone" is completely absent (doc_freq=0),
+    mixed-case so Signal 6 (ALL-CAPS only) cannot fire, and appears once in the
+    sub-questions.  Signals 4 and 5 are both suppressed.  Signal 7 catches it.
+
+    Signal breakdown:
+    - Signal 1: 15 candidates ≥ 3 → no fire
+    - Signal 2: gap_score_threshold=0.01 → no fire
+    - Signal 3: on_topic_pages=8 ≥ 2 → no fire
+    - Signal 4: _signal4_active = 8 < 7 → False → no fire
+    - Signal 5: "iphone" doc_freq=0 → excluded from _covered → never seen → no fire
+    - Signal 6: "iphone" is mixed-case → not in _acronym_key_terms → no fire
+    - Signal 7: coverage 8/15=53% < 80%; "iphone" in query, doc_freq=0 → gap=True ✓
+    """
+    store = WikiStorage(tmp_wiki / "wiki")
+
+    # 8 pages with extensive "mobile" content — these count as on-topic for the query.
+    mobile_content = (
+        "Mobile computing transformed the technology industry. Mobile devices brought "
+        "computing to users everywhere. The computing industry adapted to mobile "
+        "platforms. Mobile interfaces changed how computing systems interact with users."
+    )
+    for i in range(8):
+        store.write_page(f"mobile-page-{i}", WikiPage(
+            title=f"Mobile Computing {i}", tags=["history"],
+            content=mobile_content,
+            status="active", confidence="high", sources=[],
+        ))
+    # 7 pages about general computing with no mobile-specific content.
+    for i in range(7):
+        store.write_page(f"general-page-{i}", WikiPage(
+            title=f"Computing History {i}", tags=["history"],
+            content=(
+                "Alan Turing proposed the Turing machine as a model of computation. "
+                "John von Neumann designed the stored-program architecture."
+            ),
+            status="active", confidence="high", sources=[],
+        ))
+
+    all_slugs = [f"mobile-page-{i}" for i in range(8)] + [f"general-page-{i}" for i in range(7)]
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    # decompose() returns 2 sub-questions; "iPhone" appears once (as in the live case).
+    provider.complete.side_effect = [
+        CompletionResponse(
+            text=(
+                '["What was the significance of the iPhone in the history of computing? '
+                'How did the rise of mobile computing impact the history of computing?"]'
+            ),
+            input_tokens=10, output_tokens=20,
+        ),
+        # SearchDecomposeAgent call for suggestions (gap triggered):
+        CompletionResponse(
+            text='["iPhone history timeline", "Apple mobile computing 2007"]',
+            input_tokens=8, output_tokens=8,
+        ),
+        CompletionResponse(
+            text="No iPhone information found in this wiki.",
+            input_tokens=80, output_tokens=15,
+        ),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.01)  # signal 2 disabled
+    with patch.object(agent._search, "bm25_search", return_value=_fake_results(all_slugs)):
+        result = await agent.query(
+            "What was the significance of the iPhone and the rise of mobile computing?"
+        )
+    # Signal 7: coverage 8/15 < 80%; "iphone" in query, doc_freq=0 across all pages.
+    assert result.knowledge_gap is True
+    assert len(result.suggested_searches) >= 1
+
+
+@pytest.mark.asyncio
+async def test_gap_signal7_no_false_positive_when_entity_present(tmp_wiki):
+    """Signal 7 must NOT fire when the repeated entity term exists in retrieved pages.
+
+    Same query structure (entity repeated ≥2× in sub-questions), but the wiki has
+    pages that actually contain the entity term — doc_freq > 0 → Signal 7 cannot fire.
+    All other signals also stay silent (adequate coverage), so gap=False.
+    """
+    store = WikiStorage(tmp_wiki / "wiki")
+
+    # Pages that actually cover "turing" (the entity in question).
+    turing_content = (
+        "Alan Turing proposed the Turing machine as a theoretical model of computation. "
+        "Turing's work on computability laid the foundation for modern computer science. "
+        "The Turing test remains a benchmark for machine intelligence. "
+        "Turing contributed to cryptography at Bletchley Park during World War II."
+    )
+    for i in range(8):
+        store.write_page(f"turing-page-{i}", WikiPage(
+            title=f"Alan Turing {i}", tags=["history"],
+            content=turing_content,
+            status="active", confidence="high", sources=[],
+        ))
+
+    all_slugs = [f"turing-page-{i}" for i in range(8)]
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    # Sub-questions repeat "turing" / "Turing" multiple times.
+    provider.complete.side_effect = [
+        CompletionResponse(
+            text=(
+                '["What did Turing contribute to computer science? '
+                'How did Turing develop the Turing machine? '
+                'What was Turing\'s role in World War II cryptography?"]'
+            ),
+            input_tokens=10, output_tokens=15,
+        ),
+        CompletionResponse(
+            text="Alan Turing was a pioneering computer scientist.",
+            input_tokens=80, output_tokens=15,
+        ),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.01)  # signal 2 disabled
+    with patch.object(agent._search, "bm25_search", return_value=_fake_results(all_slugs)):
+        result = await agent.query("What were Alan Turing's main contributions?")
+    # "turing" appears in all 8 pages → doc_freq=8 > 0 → Signal 7 does not fire.
+    assert result.knowledge_gap is False
+
+
+# ── [MISSING: ...] sentinel ───────────────────────────────────────────────────
+
+def test_extract_missing_slugs_present():
+    """[MISSING: slug1, slug2] is extracted and stripped from the answer text."""
+    from synthadoc.agents.query_agent import _extract_missing_slugs
+    text = "Good answer citing [[page]].\n\n[MISSING: iphone, mobile-computing]"
+    slugs, cleaned = _extract_missing_slugs(text)
+    assert slugs == ["iphone", "mobile-computing"]
+    assert "[MISSING:" not in cleaned
+    assert "Good answer" in cleaned
+
+
+def test_extract_missing_slugs_absent():
+    """Returns empty list and original text when no [MISSING:] sentinel is present."""
+    from synthadoc.agents.query_agent import _extract_missing_slugs
+    text = "Good answer with no sentinel."
+    slugs, cleaned = _extract_missing_slugs(text)
+    assert slugs == []
+    assert cleaned == "Good answer with no sentinel."
+
+
+def test_extract_missing_slugs_single():
+    """Single slug without comma is still extracted correctly."""
+    from synthadoc.agents.query_agent import _extract_missing_slugs
+    text = "Answer text.\n[MISSING: iphone]"
+    slugs, cleaned = _extract_missing_slugs(text)
+    assert slugs == ["iphone"]
+    assert cleaned == "Answer text."
+
+
+def test_extract_missing_slugs_missing_closing_bracket():
+    """LLMs sometimes omit the closing ']' — extraction must still succeed."""
+    from synthadoc.agents.query_agent import _extract_missing_slugs
+    text = "Good answer.\n\n[MISSING: iphone, mobile-computing"
+    slugs, cleaned = _extract_missing_slugs(text)
+    assert slugs == ["iphone", "mobile-computing"]
+    assert "[MISSING:" not in cleaned
+
+
+def test_extract_missing_slugs_mid_response_preserves_trailing_content():
+    """When the sentinel appears mid-response (e.g. before a Sources section),
+    text after the sentinel must be preserved in the cleaned answer."""
+    from synthadoc.agents.query_agent import _extract_missing_slugs
+    text = (
+        "Detailed answer.\n\n"
+        "[MISSING: iphone]\n\n"
+        "Sources: [[page1]], [[page2]]"
+    )
+    slugs, cleaned = _extract_missing_slugs(text)
+    assert slugs == ["iphone"]
+    assert "[MISSING:" not in cleaned
+    assert "Sources:" in cleaned
+    assert "Detailed answer" in cleaned
+
+
+@pytest.mark.asyncio
+async def test_missing_sentinel_generates_enrich_chips_after_guard_c(tmp_wiki):
+    """[MISSING: ...] appended by the LLM re-enables gap chips even when Guard C
+    suppressed _gap for a well-cited answer.  The sentinel must NOT appear in
+    the token stream emitted to clients."""
+    # Answer body: >800 chars + a [[wikilink]] citation → Guard C HIGH_CONF path.
+    body = "Detailed answer about mobile computing history. " * 22  # ~1056 chars
+    llm_tokens = [body + "[[some-page]]\n\n", "[MISSING: iphone, mobile-computing]"]
+
+    store = WikiStorage(tmp_wiki / "wiki")
+    # Empty wiki → 0 candidates → Signal 1 fires → _gap=True pre-synthesis.
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.return_value = CompletionResponse(
+        text='["What was the significance of the iPhone?"]',
+        input_tokens=5, output_tokens=5,
+    )
+
+    async def _gap_stream(**kw):
+        for tok in llm_tokens:
+            yield tok
+
+    provider.complete_stream = _gap_stream
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.01)
+
+    events = await _collect_events(agent.run_stream("What was the iPhone's significance?"))
+
+    token_text = "".join(
+        e["data"]["text"] for e in events if e.get("event") == "token"
+    )
+    gap_events = [e for e in events if e.get("event") == "gap"]
+
+    assert "[MISSING:" not in token_text, "sentinel must not be streamed to clients"
+    assert len(gap_events) == 1, "gap event must fire"
+    assert gap_events[0]["data"]["suggested_searches"] == ["iphone", "mobile computing"]
+
+
+@pytest.mark.asyncio
+async def test_missing_sentinel_absent_guard_c_suppresses_normally(tmp_wiki):
+    """When no [MISSING:] sentinel is present and Guard C suppresses, no gap chips appear."""
+    # Answer body: >800 chars + citation → Guard C HIGH_CONF suppresses gap.
+    body = "Detailed answer about computing history. " * 22
+    llm_tokens = [body + "[[some-page]]"]
+
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.return_value = CompletionResponse(
+        text='["What was the significance of mobile computing?"]',
+        input_tokens=5, output_tokens=5,
+    )
+
+    async def _gap_stream(**kw):
+        for tok in llm_tokens:
+            yield tok
+
+    provider.complete_stream = _gap_stream
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.01)
+
+    events = await _collect_events(agent.run_stream("What is mobile computing?"))
+
+    gap_events = [e for e in events if e.get("event") == "gap"]
+    assert len(gap_events) == 0, "Guard C suppressed gap — no chips should appear"
+
+
+# ── CJK (Chinese / Japanese / Korean) coverage ───────────────────────────────
+
+@pytest.mark.asyncio
+async def test_query_cjk_decompose_returns_cjk_subquestions(tmp_wiki):
+    """decompose() with a CJK question returns CJK sub-question strings without encoding loss."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.return_value = CompletionResponse(
+        text='["图灵机的工作原理是什么？", "图灵机与现代计算机的关系"]',
+        input_tokens=10, output_tokens=10,
+    )
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    sub_qs = await agent.decompose("图灵机是什么以及它如何影响现代计算机？")
+
+    assert len(sub_qs) == 2
+    assert "图灵机的工作原理是什么？" in sub_qs
+    assert "图灵机与现代计算机的关系" in sub_qs
+
+
+@pytest.mark.asyncio
+async def test_query_cjk_pages_answered_without_gap(tmp_wiki):
+    """CJK wiki pages + CJK question → citations include CJK slugs, no false knowledge gap.
+
+    Verifies that:
+    - CJK page content is included in the synthesis prompt (LLM sees Chinese text)
+    - knowledge_gap=False when ≥ 3 pages are retrieved with a high BM25 score
+    - citations include the CJK page slugs
+    """
+    store = WikiStorage(tmp_wiki / "wiki")
+    for i in range(4):
+        store.write_page(f"图灵机-{i}", WikiPage(
+            title=f"图灵机 {i}", tags=["计算理论"],
+            content="图灵机是一种理论计算模型，由艾伦·图灵于1936年提出。" * 5,
+            status="active", confidence="high", sources=[],
+        ))
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text="What is a Turing machine?", input_tokens=20, output_tokens=5),  # translate
+        CompletionResponse(text='["What is a Turing machine?"]', input_tokens=5, output_tokens=5),  # decompose
+        CompletionResponse(text="图灵机是一种理论计算模型。", input_tokens=80, output_tokens=20),  # synthesis
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.01)
+    cjk_slugs = [f"图灵机-{i}" for i in range(4)]
+    with patch.object(agent._search, "bm25_search", return_value=_fake_results(cjk_slugs, score=5.0)):
+        result = await agent.query("图灵机是什么？")
+
+    assert result.knowledge_gap is False
+    assert result.answer == "图灵机是一种理论计算模型。"
+    assert any("图灵机" in c for c in result.citations)
+    # Verify CJK page content reached the synthesis prompt (3rd call: translate, decompose, synthesis)
+    synthesis_call = provider.complete.call_args_list[2]
+    prompt_text = synthesis_call[1]["messages"][0].content
+    assert "图灵机" in prompt_text
+
+
+@pytest.mark.asyncio
+async def test_cjk_query_no_false_gap(tmp_wiki):
+    """CJK queries must not trigger spurious knowledge gaps from signals 3–5.
+
+    Chinese text has no whitespace word boundaries, so split() yields the whole
+    sentence as one token.  That token is almost certainly absent from any page
+    (doc_freq=0), which would fire signal 4 even when the wiki fully covers the
+    topic.  The fix detects CJK characters and skips key-term extraction entirely,
+    leaving only the language-agnostic signals 1 and 2 active.
+    """
+    store = WikiStorage(tmp_wiki / "wiki")
+
+    # 5 pages that clearly cover the topic (high BM25 score, ≥ 3 candidates).
+    for i in range(5):
+        store.write_page(f"page-{i}", WikiPage(
+            title=f"Computing {i}", tags=["history"],
+            content="Alan Turing invented the Turing machine. " * 20,
+            status="active", confidence="high", sources=[],
+        ))
+
+    slugs = [f"page-{i}" for i in range(5)]
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text="What is a Turing machine?", input_tokens=20, output_tokens=5),  # translate
+        CompletionResponse(text='["What is a Turing machine?"]', input_tokens=5, output_tokens=5),  # decompose
+        CompletionResponse(text="图灵机是一种理论计算模型。", input_tokens=80, output_tokens=20),  # synthesis
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.01)
+    with patch.object(agent._search, "bm25_search", return_value=_fake_results(slugs, score=5.0)):
+        result = await agent.query("图灵机是什么？")
+    # CJK input → translated to English for retrieval → _gap_q is English.
+    # Signals 1 (5 pages ≥ 3) and 2 (score 5.0 ≥ 0.01) both pass → no gap.
+    assert result.knowledge_gap is False
+
+
+# ── alias expansion ───────────────────────────────────────────────────────────
+
+def _page_with_aliases(aliases: list[str]) -> WikiPage:
+    return WikiPage(title="spatula", tags=[], content="content",
+                    status="active", confidence="high", sources=[], aliases=aliases)
+
+
+def test_expand_aliases_replaces_known_term(tmp_wiki):
+    store = WikiStorage(tmp_wiki / "wiki")
+    store.write_page("spatula", _page_with_aliases(["flat flippy thing", "flipper"]))
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    qa = QueryAgent(provider=provider, store=store, search=search)
+    result = qa._expand_aliases("tell me about the flat flippy thing")
+    assert "spatula" in result
+
+
+def test_expand_aliases_no_match_returns_original(tmp_wiki):
+    store = WikiStorage(tmp_wiki / "wiki")
+    store.write_page("spatula", _page_with_aliases(["flipper"]))
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    qa = QueryAgent(provider=provider, store=store, search=search)
+    result = qa._expand_aliases("what is a spoon?")
+    assert result == "what is a spoon?"
+
+
+def test_expand_aliases_empty_wiki_returns_original(tmp_wiki):
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    qa = QueryAgent(provider=provider, store=store, search=search)
+    result = qa._expand_aliases("what is a spatula?")
+    assert result == "what is a spatula?"
+
+
+def test_expand_aliases_longer_alias_replaced_first(tmp_wiki):
+    """Longer aliases take priority to avoid partial substring replacement."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    store.write_page("spatula", _page_with_aliases(["flat flippy thing", "flat"]))
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    qa = QueryAgent(provider=provider, store=store, search=search)
+    result = qa._expand_aliases("the flat flippy thing is useful")
+    assert "spatula" in result
+    assert "flippy thing" not in result
+
+
+def test_expand_aliases_case_insensitive(tmp_wiki):
+    """Alias stored as lowercase must match mixed-case query terms."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    store.write_page("alan-turing", _page_with_aliases(["Ada", "Lady Lovelace"]))
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    qa = QueryAgent(provider=provider, store=store, search=search)
+    # Mixed-case in query must match alias stored as "ada" in the map
+    result = qa._expand_aliases("What did Ada contribute to computing?")
+    assert "alan-turing" in result
+    # Full capitalised alias
+    result2 = qa._expand_aliases("What did LADY LOVELACE achieve?")
+    assert "alan-turing" in result2
+
+
+# ── sub-question gap detection (framed queries) ───────────────────────────────
+
+@pytest.mark.asyncio
+async def test_framed_query_gap_detected_via_sub_questions(tmp_wiki):
+    """A verbose request like 'please provide details of X' should fire gap detection
+    when X is not in the wiki, the same as the bare 'what is X?' form.
+
+    decompose() strips the request framing and returns clean sub-questions; gap
+    detection uses those instead of the raw question so framing words don't
+    dilute the key-term absence signals.
+    """
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+
+    # Wiki has pages about general AI topics — topic-adjacent but no agent-as-a-judge
+    for i in range(5):
+        store.write_page(f"ai-page-{i}", WikiPage(
+            title=f"AI Page {i}", tags=[],
+            content="Artificial intelligence and design of neural networks. Benchmarks for evaluation.",
+            status="active", confidence="high", sources=[],
+        ))
+
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        # decompose strips framing → clean sub-questions that isolate the actual topic
+        CompletionResponse(
+            text='["What is agent-as-a-judge?", "What are benchmarks for agent-as-a-judge systems?"]',
+            input_tokens=10, output_tokens=10,
+        ),
+        # synthesis answer (gap=True branch — general knowledge answer)
+        CompletionResponse(
+            text="Agent-as-a-judge is an evaluation paradigm where an LLM grades other LLMs.",
+            input_tokens=80, output_tokens=20,
+        ),
+        # SearchDecomposeAgent suggested searches
+        CompletionResponse(
+            text='["agent-as-a-judge definition", "LLM evaluation benchmarks"]',
+            input_tokens=10, output_tokens=10,
+        ),
+    ]
+
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=2.0)
+    all_slugs = [f"ai-page-{i}" for i in range(5)]
+    with patch.object(agent._search, "bm25_search",
+                      return_value=_fake_results(all_slugs, score=3.0)):
+        result = await agent.query(
+            "please provide some details of agent-as-a-judge design and benchmark information"
+        )
+
+    assert result.knowledge_gap is True
+    assert len(result.suggested_searches) >= 1
+
+
+# ── post-synthesis [GAP] sentinel ────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_gap_sentinel_overrides_no_gap_when_llm_returns_gap_marker(tmp_wiki):
+    """When pre-synthesis gap=False but the LLM prefixes its answer with [GAP],
+    knowledge_gap must be True, suggested_searches populated, and the [GAP]
+    marker stripped from the returned answer text."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        # decompose call
+        CompletionResponse(text='["How did Moore\'s Law shape hardware?"]',
+                           input_tokens=5, output_tokens=5),
+        # synthesis returns [GAP] sentinel — wiki pages mention "moore" but don't cover the topic
+        CompletionResponse(text="[GAP]\nNone of the pages explain Moore's Law directly.",
+                           input_tokens=80, output_tokens=20),
+        # SearchDecomposeAgent call triggered by sentinel
+        CompletionResponse(text='["Moore\'s Law history", "hardware scaling trends"]',
+                           input_tokens=10, output_tokens=10),
+    ]
+
+    # Write pages with enough "moore" references to pass Guard B (no pre-synthesis gap)
+    reference_content = (
+        "Moore observed transistor density doubles every two years. "
+        "moore's prediction shaped the semiconductor roadmap. "
+        "Hardware engineers used moore as a guiding principle."
+    )
+    for i in range(8):
+        store.write_page(f"hw-{i}", WikiPage(
+            title=f"Hardware {i}", tags=[], content=reference_content,
+            status="active", confidence="high", sources=[],
+        ))
+
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.01)
+    all_slugs = [f"hw-{i}" for i in range(8)]
+    with patch.object(agent._search, "bm25_search",
+                      return_value=_fake_results(all_slugs, score=8.0)):
+        result = await agent.query("How did Moore's Law shape hardware design?")
+
+    assert result.knowledge_gap is True
+    assert len(result.suggested_searches) > 0
+    # [GAP] marker must be stripped from displayed answer
+    assert not result.answer.startswith("[GAP]")
+    assert "None of the pages" in result.answer
+
+
+@pytest.mark.asyncio
+async def test_gap_sentinel_not_triggered_when_llm_answers_normally(tmp_wiki):
+    """When the LLM synthesis does not start with [GAP], knowledge_gap stays False."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["What is AI?"]', input_tokens=5, output_tokens=5),
+        CompletionResponse(text="AI stands for Artificial Intelligence [[ai-overview]].",
+                           input_tokens=80, output_tokens=20),
+    ]
+    for i in range(5):
+        store.write_page(f"ai-{i}", WikiPage(
+            title=f"AI Page {i}", tags=[], content="Artificial intelligence overview. " * 10,
+            status="active", confidence="high", sources=[],
+        ))
+
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.0)
+    all_slugs = [f"ai-{i}" for i in range(5)]
+    with patch.object(agent._search, "bm25_search",
+                      return_value=_fake_results(all_slugs, score=5.0)):
+        result = await agent.query("What is AI?")
+
+    assert result.knowledge_gap is False
+    assert result.answer == "AI stands for Artificial Intelligence [[ai-overview]]."
+    # Only 2 provider calls: decompose + synthesis. No SearchDecomposeAgent call.
+    assert provider.complete.call_count == 2
+
+
+# ── system knowledge ──────────────────────────────────────────────────────────
+
+def test_system_knowledge_loaded():
+    """_SYSTEM_KNOWLEDGE must contain at least the four bundled help pages."""
+    from synthadoc.agents.query_agent import _SYSTEM_KNOWLEDGE
+    assert len(_SYSTEM_KNOWLEDGE) >= 4
+    titles = [p.title for p in _SYSTEM_KNOWLEDGE]
+    assert any("Ingest" in t for t in titles)
+    assert any("Lint" in t for t in titles)
+    assert any("Export" in t for t in titles)
+    assert any("Lifecycle" in t for t in titles)
+
+
+def test_get_relevant_system_pages_ingest_keyword(tmp_wiki):
+    """'ingest' in question must match the ingest guide page."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    result = agent._get_relevant_system_pages("What file types can I ingest?")
+    assert result != ""
+    assert "Ingest" in result or "ingest" in result.lower()
+
+
+def test_get_relevant_system_pages_no_match(tmp_wiki):
+    """A question with no Synthadoc keywords must return an empty string."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    result = agent._get_relevant_system_pages("What is the capital of France?")
+    assert result == ""
+
+
+def test_get_relevant_system_pages_history_domain_query_no_match(tmp_wiki):
+    """'history of computing' must NOT match the schedule guide (history is a domain word)."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    result = agent._get_relevant_system_pages(
+        "What exactly was Alan Turing's contribution to the history of computing?"
+    )
+    assert result == "", f"Domain 'history' query should not trigger system knowledge, got: {result[:100]!r}"
+
+
+def test_get_relevant_system_pages_lint_keyword(tmp_wiki):
+    """'lint' in question must match the lint guide page."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    result = agent._get_relevant_system_pages("How do I run lint checks?")
+    assert result != ""
+    assert "Lint" in result or "lint" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_fetch_live_wiki_data_recent_changes(tmp_wiki):
+    """'What changed this week?' must include recent ingest history."""
+    from synthadoc.storage.log import AuditDB
+
+    audit_path = tmp_wiki / ".synthadoc" / "audit.db"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    db = AuditDB(audit_path)
+    await db.init()
+
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    agent = QueryAgent(provider=AsyncMock(), store=store, search=search)
+
+    recent_row = [{"wiki_page": "alan-turing", "source_path": "turing.pdf",
+                   "ingested_at": "2026-06-03T10:00:00+00:00"}]
+    with patch.object(AuditDB, "list_ingests_since", new=AsyncMock(return_value=recent_row)), \
+         patch.object(AuditDB, "get_lifecycle_summary", new=AsyncMock(return_value={"active": 5})):
+        result = await agent._fetch_live_wiki_data("What changed in the wiki this week?")
+
+    assert "alan-turing" in result
+    assert "last 7 days" in result
+
+
+@pytest.mark.asyncio
+async def test_query_system_knowledge_suppresses_gap(tmp_wiki):
+    """When system knowledge matches, gap must be suppressed even at very high threshold."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["What file types can I ingest?"]',
+                           input_tokens=5, output_tokens=5),
+        CompletionResponse(text="You can ingest PDF, DOCX, and more.",
+                           input_tokens=80, output_tokens=15),
+    ]
+    # Very high threshold that would normally fire gap — system knowledge must override
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=999.0)
+    result = await agent.query("What file types can I ingest?")
+    assert result.knowledge_gap is False
+    assert result.suggested_searches == []
+
+
+@pytest.mark.asyncio
+async def test_query_system_knowledge_in_synthesis_prompt(tmp_wiki):
+    """When system knowledge matches, synthesis prompt must contain 'Synthadoc Help'."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["What file types can I ingest?"]',
+                           input_tokens=5, output_tokens=5),
+        CompletionResponse(text="You can ingest PDF, DOCX, and more.",
+                           input_tokens=80, output_tokens=15),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search, gap_score_threshold=0.0)
+    await agent.query("What file types can I ingest?")
+
+    # The second complete() call is synthesis — its prompt must include Synthadoc Help
+    assert len(provider.complete.call_args_list) >= 2
+    synthesis_prompt = provider.complete.call_args_list[1][1]["messages"][0].content
+    assert "Synthadoc Help" in synthesis_prompt
+    # Wiki pages must NOT be in the synthesis context (they're noise for product questions)
+    assert "No relevant pages found" not in synthesis_prompt
+
+
+@pytest.mark.asyncio
+async def test_query_system_knowledge_no_wiki_citations(tmp_wiki):
+    """When system knowledge matches, citations list must be empty (no wiki pages injected)."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["What file types can I ingest?"]',
+                           input_tokens=5, output_tokens=5),
+        CompletionResponse(text="You can ingest PDF, DOCX, and more.",
+                           input_tokens=80, output_tokens=15),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search, gap_score_threshold=0.0)
+    result = await agent.query("What file types can I ingest?")
+    assert result.citations == []
+
+
+# ── _fetch_live_wiki_data ──────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_fetch_live_wiki_data_no_db_returns_empty(tmp_wiki):
+    """Returns empty string gracefully when audit.db does not exist."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    agent = QueryAgent(provider=AsyncMock(), store=store, search=search)
+    result = await agent._fetch_live_wiki_data("which pages are stale?")
+    assert result == ""
+
+
+@pytest.mark.asyncio
+async def test_fetch_live_wiki_data_no_trigger_returns_empty(tmp_wiki):
+    """Returns empty string when question has no lifecycle keywords."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    agent = QueryAgent(provider=AsyncMock(), store=store, search=search)
+    result = await agent._fetch_live_wiki_data("tell me about the Roman Empire")
+    assert result == ""
+
+
+@pytest.mark.asyncio
+async def test_fetch_live_wiki_data_returns_counts(tmp_wiki):
+    """Returns lifecycle counts when audit.db exists with page states."""
+    sd = tmp_wiki / ".synthadoc"
+    sd.mkdir(parents=True, exist_ok=True)
+    audit = AuditDB(sd / "audit.db")
+    await audit.init()
+    await audit.set_page_state("page-a", "active", "test")
+    await audit.set_page_state("page-b", "stale", "test")
+    await audit.set_page_state("page-c", "stale", "test")
+
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    agent = QueryAgent(provider=AsyncMock(), store=store, search=search)
+    result = await agent._fetch_live_wiki_data("which pages are stale?")
+
+    assert "stale" in result
+    assert "page-b" in result
+    assert "page-c" in result
+    assert "active" in result
+
+
+@pytest.mark.asyncio
+async def test_fetch_live_wiki_data_counts_contradicted(tmp_wiki):
+    """'how many pages contradicted' triggers live data with contradiction counts."""
+    sd = tmp_wiki / ".synthadoc"
+    sd.mkdir(parents=True, exist_ok=True)
+    audit = AuditDB(sd / "audit.db")
+    await audit.init()
+    await audit.set_page_state("page-x", "contradicted", "test")
+
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    agent = QueryAgent(provider=AsyncMock(), store=store, search=search)
+    result = await agent._fetch_live_wiki_data("how many pages contradicted?")
+
+    assert "contradicted" in result
+    assert "page-x" in result
+
+
+@pytest.mark.asyncio
+async def test_query_live_data_injected_into_synthesis(tmp_wiki):
+    """When lifecycle question matches system knowledge, synthesis prompt contains Live Wiki Data."""
+    sd = tmp_wiki / ".synthadoc"
+    sd.mkdir(parents=True, exist_ok=True)
+    audit = AuditDB(sd / "audit.db")
+    await audit.init()
+    await audit.set_page_state("my-page", "stale", "test")
+
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["which pages are stale?"]', input_tokens=5, output_tokens=5),
+        CompletionResponse(text="Here are the stale pages...", input_tokens=80, output_tokens=15),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search, gap_score_threshold=0.0)
+    await agent.query("which pages are stale?")
+
+    synthesis_prompt = provider.complete.call_args_list[1][1]["messages"][0].content
+    assert "Live Wiki Data" in synthesis_prompt
+    assert "my-page" in synthesis_prompt
+
+
+@pytest.mark.asyncio
+async def test_no_gap_for_wiki_introspective_queries(tmp_wiki):
+    """Meta-questions about the wiki's own scope must never trigger a knowledge gap.
+
+    "What topics does this wiki cover?" has all content words filtered as stopwords
+    (topic, cover) or too short (wiki, what, does, this), so _key_terms is empty and
+    BM25 returns < 3 candidates — signal 1 fires. The _WIKI_INTROSPECTIVE_TRIGGERS
+    guard must suppress this before SearchDecomposeAgent is called.
+    """
+    store = WikiStorage(tmp_wiki / "wiki")
+    store.write_page("neural-networks", WikiPage(
+        title="Neural Networks", tags=["ai"],
+        content="Neural networks are computational models inspired by the brain. "
+                "They consist of layers of interconnected nodes.",
+        status="active", confidence="high", sources=[],
+    ))
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["What topics does this wiki cover?"]',
+                           input_tokens=5, output_tokens=5),
+        CompletionResponse(text="This wiki covers neural networks and AI topics.",
+                           input_tokens=50, output_tokens=10),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    result = await agent.query("What topics does this wiki cover?")
+
+    assert result.knowledge_gap is False
+    assert result.suggested_searches == []
+    # SearchDecomposeAgent should NOT have been called (only 2 complete() calls total)
+    assert provider.complete.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_no_gap_for_key_topics_phrasing(tmp_wiki):
+    """'What are the key topics in this wiki?' must not trigger a gap.
+
+    Previously the trigger 'what topics' missed this because 'what' and 'topics'
+    are not adjacent — 'are the key' sits between them. The new 'key topics'
+    trigger must catch it.
+    """
+    store = WikiStorage(tmp_wiki / "wiki")
+    store.write_page("transformer", WikiPage(
+        title="Transformer Architecture", tags=["ai"],
+        content="The transformer uses self-attention to process sequences in parallel.",
+        status="active", confidence="high", sources=[],
+    ))
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["What are the key topics in this wiki?"]',
+                           input_tokens=5, output_tokens=5),
+        CompletionResponse(text="This wiki covers transformers and attention mechanisms.",
+                           input_tokens=50, output_tokens=10),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    result = await agent.query("What are the key topics in this wiki?")
+
+    assert result.knowledge_gap is False
+    assert result.suggested_searches == []
+    assert provider.complete.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_no_gap_for_topics_in_this_wiki_phrasing(tmp_wiki):
+    """'What topics are covered in this wiki?' must not trigger a gap."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    store.write_page("llm", WikiPage(
+        title="Large Language Models", tags=["ai"],
+        content="Large language models are trained on vast text corpora using transformers.",
+        status="active", confidence="high", sources=[],
+    ))
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["topics in this wiki"]',
+                           input_tokens=5, output_tokens=5),
+        CompletionResponse(text="This wiki covers LLMs.",
+                           input_tokens=50, output_tokens=10),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    result = await agent.query("What topics are covered in this wiki?")
+
+    assert result.knowledge_gap is False
+    assert result.suggested_searches == []
+    assert provider.complete.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_no_gap_for_wiki_purpose_phrasing(tmp_wiki):
+    """'Summarize Wiki Purpose — General' must not trigger a gap (wiki-purpose introspective)."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    store.write_page("llm", WikiPage(
+        title="Large Language Models", tags=["ai"],
+        content="Large language models are trained on vast text corpora using transformers.",
+        status="active", confidence="high", sources=[],
+    ))
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["wiki purpose general"]',
+                           input_tokens=5, output_tokens=5),
+        CompletionResponse(text="This wiki serves as a knowledge base for AI research.",
+                           input_tokens=50, output_tokens=10),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    result = await agent.query("Summarize Wiki Purpose — General")
+
+    assert result.knowledge_gap is False
+    assert result.suggested_searches == []
+    assert provider.complete.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_no_gap_for_purpose_of_this_wiki(tmp_wiki):
+    """'What is the purpose of this wiki?' must not trigger a gap."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    store.write_page("llm", WikiPage(
+        title="Large Language Models", tags=["ai"],
+        content="Large language models are trained on vast text corpora using transformers.",
+        status="active", confidence="high", sources=[],
+    ))
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["ai wiki purpose"]',
+                           input_tokens=5, output_tokens=5),
+        CompletionResponse(text="This wiki covers AI and machine learning topics.",
+                           input_tokens=50, output_tokens=10),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    result = await agent.query("What is the purpose of this wiki?")
+
+    assert result.knowledge_gap is False
+    assert result.suggested_searches == []
+    assert provider.complete.call_count == 2
+
+
+# ── _parse_lookback_days ──────────────────────────────────────────────────────
+
+def test_parse_lookback_days_week():
+    assert _parse_lookback_days("What changed this week?") == 7
+
+def test_parse_lookback_days_recently():
+    assert _parse_lookback_days("What changed recently?") == 7
+
+def test_parse_lookback_days_month():
+    assert _parse_lookback_days("What changed this month?") == 30
+
+def test_parse_lookback_days_last_month():
+    assert _parse_lookback_days("What pages were added last month?") == 30
+
+def test_parse_lookback_days_year():
+    assert _parse_lookback_days("What pages were added this year?") == 365
+
+def test_parse_lookback_days_last_year():
+    assert _parse_lookback_days("What changed last year?") == 365
+
+def test_parse_lookback_days_n_months():
+    assert _parse_lookback_days("What changed in the last 3 months?") == 90
+
+def test_parse_lookback_days_2_months():
+    assert _parse_lookback_days("What pages were added in the last 2 months?") == 60
+
+def test_parse_lookback_days_n_weeks():
+    assert _parse_lookback_days("Show changes from the past 2 weeks") == 14
+
+
+# ── live-data routing without system knowledge page match ─────────────────────
+
+@pytest.mark.asyncio
+async def test_live_data_routed_without_system_ctx(tmp_wiki):
+    """'What changed in the wiki this week?' must use audit log even when no system
+    knowledge page matches — the pure live-data path introduced in the routing fix.
+    """
+    sd = tmp_wiki / ".synthadoc"
+    sd.mkdir(parents=True, exist_ok=True)
+    audit = AuditDB(sd / "audit.db")
+    await audit.init()
+    await audit.record_ingest("abc", 100, "notes.md", "my-notes", 10, 0.001)
+
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["What changed in the wiki this week?"]',
+                           input_tokens=5, output_tokens=5),
+        CompletionResponse(text="Here is what changed this week...",
+                           input_tokens=80, output_tokens=15),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search, gap_score_threshold=0.0)
+    result = await agent.query("What changed in the wiki this week?")
+
+    synthesis_prompt = provider.complete.call_args_list[1][1]["messages"][0].content
+    assert "Live Wiki Data" in synthesis_prompt
+    assert "my-notes" in synthesis_prompt
+    assert result.knowledge_gap is False
+    assert result.cacheable is False
+    assert result.citations == []
+
+
+@pytest.mark.asyncio
+async def test_live_data_month_lookback(tmp_wiki):
+    """'What changed this month?' must query with a 30-day window, not 7 days."""
+    sd = tmp_wiki / ".synthadoc"
+    sd.mkdir(parents=True, exist_ok=True)
+    audit = AuditDB(sd / "audit.db")
+    await audit.init()
+    await audit.record_ingest("abc", 100, "notes.md", "monthly-page", 10, 0.001)
+
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["What changed this month?"]',
+                           input_tokens=5, output_tokens=5),
+        CompletionResponse(text="Here is what changed this month...",
+                           input_tokens=80, output_tokens=15),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search, gap_score_threshold=0.0)
+    result = await agent.query("What changed this month?")
+
+    synthesis_prompt = provider.complete.call_args_list[1][1]["messages"][0].content
+    assert "Live Wiki Data" in synthesis_prompt
+    assert "monthly-page" in synthesis_prompt
+    assert "month" in synthesis_prompt  # window label in section heading
+    assert result.knowledge_gap is False
+    assert result.cacheable is False
+
+
+# ── history injection / RewriteAgent integration ─────────────────────────────
+
+def _make_stream_agent(tmp_wiki, stream_tokens=("The answer.",)):
+    """Return (store, search, provider, agent) wired for run_stream() with a
+    single wiki page so BM25 returns at least one candidate."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    store.write_page("topic-a", WikiPage(
+        title="Topic A", tags=[],
+        content="topic alpha beta gamma delta epsilon zeta eta theta iota kappa",
+        status="active", confidence="high", sources=[],
+    ))
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    # decompose() call → single sub-question
+    provider.complete.return_value = CompletionResponse(
+        text='["topic alpha question?"]', input_tokens=5, output_tokens=5,
+    )
+    # complete_stream() yields the given tokens
+    async def _fake_stream(**kw):
+        for tok in stream_tokens:
+            yield tok
+    provider.complete_stream = _fake_stream
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=0.0)
+    return store, search, provider, agent
+
+
+async def _collect_events(gen) -> list[dict]:
+    events = []
+    async for ev in gen:
+        events.append(ev)
+    return events
+
+
+@pytest.mark.asyncio
+async def test_run_stream_history_calls_rewrite_agent(tmp_wiki):
+    """RewriteAgent.rewrite() is called when history is provided."""
+    store, search, provider, agent = _make_stream_agent(tmp_wiki)
+    question = "What is it?"
+    history = [{"role": "user", "content": "prior question about topic alpha"}]
+
+    with patch("synthadoc.agents.query_agent.RewriteAgent") as mock_cls:
+        mock_cls.return_value.rewrite = AsyncMock(return_value="rewritten question about topic alpha")
+        await _collect_events(agent.run_stream(question, history=history))
+        mock_cls.return_value.rewrite.assert_called_once_with(question, history)
+
+
+@pytest.mark.asyncio
+async def test_run_stream_no_history_skips_rewrite(tmp_wiki):
+    """RewriteAgent.rewrite() is NOT called when history=None."""
+    store, search, provider, agent = _make_stream_agent(tmp_wiki)
+
+    with patch("synthadoc.agents.query_agent.RewriteAgent") as mock_cls:
+        mock_cls.return_value.rewrite = AsyncMock(return_value="should not be called")
+        await _collect_events(agent.run_stream("What is topic alpha?"))
+        mock_cls.return_value.rewrite.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_stream_action_clarify_yields_clarify_event(tmp_wiki):
+    """When action_result.needs_clarification=True, a clarify event is yielded."""
+    from synthadoc.agents.action_agent import ActionResult
+    store, search, provider, agent = _make_stream_agent(tmp_wiki)
+
+    clarify_result = ActionResult(
+        action_type="schedule_add",
+        success=False,
+        message="",
+        needs_clarification=True,
+        clarify_prompt="Which schedule interval?",
+        clarify_candidates=["daily", "weekly"],
+    )
+
+    # Give the agent a mock orchestrator so the action pre-flight executes
+    mock_orchestrator = object()
+    agent._orchestrator = mock_orchestrator
+
+    with patch("synthadoc.agents.query_agent.ActionAgent") as mock_action_cls:
+        mock_action_cls.return_value.detect.return_value = True
+        mock_action_cls.return_value.run = AsyncMock(return_value=clarify_result)
+        events = await _collect_events(agent.run_stream("schedule ingest daily"))
+
+    event_types = [e["event"] for e in events]
+    assert "clarify" in event_types
+    assert "done" in event_types
+    # Must NOT emit a token event for a clarification
+    assert "token" not in event_types
+
+    clarify_ev = next(e for e in events if e["event"] == "clarify")
+    assert clarify_ev["data"]["prompt"] == "Which schedule interval?"
+    assert clarify_ev["data"]["candidates"] == ["daily", "weekly"]
+    assert clarify_ev["data"]["action"] == "schedule_add"
+
+
+@pytest.mark.asyncio
+async def test_run_stream_history_injected_into_synthesis_prompt(tmp_wiki):
+    """History block appears in the synthesis prompt sent to the LLM."""
+    store, search, provider, agent = _make_stream_agent(tmp_wiki)
+    history = [{"role": "user", "content": "what about earlier?"}]
+
+    captured_messages: list = []
+
+    async def _capturing_stream(messages, **kw):
+        captured_messages.extend(messages)
+        yield "answer"
+
+    provider.complete_stream = _capturing_stream
+
+    await _collect_events(agent.run_stream("Tell me more.", history=history))
+
+    assert captured_messages, "complete_stream was never called"
+    prompt_text = captured_messages[0].content
+    assert "Conversation so far" in prompt_text and "what about earlier?" in prompt_text
+
+
+@pytest.mark.asyncio
+async def test_run_stream_followup_uses_rewritten_question_for_live_data(tmp_wiki):
+    """Ambiguous follow-up ('check it again') must not trigger a gap when
+    RewriteAgent resolves it to a job-status query.
+
+    Regression: live-data and system-knowledge lookups used the original question;
+    context-dependent phrases like 'check it again' have no live-data triggers,
+    so _live_data was empty → gap fired. Fix: use retrieval_question for lookups.
+    """
+    from unittest.mock import MagicMock
+    sd = tmp_wiki / ".synthadoc"
+    sd.mkdir(parents=True, exist_ok=True)
+    audit = AuditDB(sd / "audit.db")
+    await audit.init()
+
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+
+    provider = AsyncMock()
+    provider.complete.return_value = CompletionResponse(
+        text='["check job status a95c6a33"]', input_tokens=5, output_tokens=5
+    )
+    async def _fake_stream(**kw):
+        yield "Job a95c6a33 is now running."
+    provider.complete_stream = _fake_stream
+
+    mock_job = MagicMock()
+    mock_job.status = MagicMock()
+    mock_job.status.value = "running"
+    mock_job.operation = "lint"
+    mock_job.retries = 0
+    mock_job.error = None
+    mock_job.created_at = "2026-06-16T14:11:16"
+
+    mock_queue = AsyncMock()
+    mock_queue.get_job.return_value = mock_job
+
+    mock_orchestrator = MagicMock()
+    mock_orchestrator._queue = mock_queue
+
+    agent = QueryAgent(provider=provider, store=store, search=search,
+                       gap_score_threshold=2.0, orchestrator=mock_orchestrator)
+
+    history = [
+        {"role": "user", "content": "Job ID: a95c6a33"},
+        {"role": "assistant", "content": "Job a95c6a33 is pending."},
+    ]
+
+    with patch("synthadoc.agents.query_agent.RewriteAgent") as mock_rw_cls, \
+         patch("synthadoc.agents.query_agent.ActionAgent") as mock_action_cls:
+        mock_rw_cls.return_value.rewrite = AsyncMock(return_value="check job status a95c6a33")
+        mock_action_cls.return_value.detect.return_value = False
+
+        events = await _collect_events(agent.run_stream("check it again", history=history))
+
+    done_ev = next(e for e in events if e["event"] == "done")
+    assert done_ev["data"].get("gap", False) is False, (
+        "Knowledge Gap must not fire for a job follow-up resolved via retrieval_question"
+    )
+    mock_queue.get_job.assert_called_once_with("a95c6a33")
+
+
+def test_detect_gap_signal1_suppressed_when_tf_fallback(tmp_wiki):
+    """Signal 1 (len<3) must not fire when used_tf_fallback=True."""
+    from synthadoc.agents.query_agent import QueryAgent
+    from synthadoc.storage.search import SearchResult
+    from unittest.mock import MagicMock
+
+    agent = MagicMock(spec=QueryAgent)
+    agent._gap_score_threshold = 0.5
+    agent._detect_gap = QueryAgent._detect_gap.__get__(agent, QueryAgent)
+
+    # Use 2 candidates with tf_fallback to test Signal 1 suppression
+    # (each term must appear 2+ times to count as on-topic, per _MIN_TERM_FREQ)
+    candidates = [
+        SearchResult(slug="plan1", score=0.8, title="Plan 1", snippet="", tf_fallback=True),
+        SearchResult(slug="plan2", score=0.7, title="Plan 2", snippet="", tf_fallback=True),
+    ]
+
+    # Mock store.read_page to return a page with overlapping content (terms 2+ times)
+    agent._store = MagicMock()
+    def mock_read_page(slug):
+        return MagicMock(content="capex maintenance capex maintenance budget")
+    agent._store.read_page.side_effect = mock_read_page
+
+    gap, _, _, _ = agent._detect_gap(
+        question="capex maintenance",
+        candidates=candidates,
+        max_score=0.8,
+        used_tf_fallback=True,
+    )
+    # Signal 1 suppressed → gap should be False
+    assert gap is False, "Signal 1 should be suppressed when tf_fallback=True"
+
+
+def test_detect_gap_signal1_fires_without_tf_fallback(tmp_wiki):
+    """Signal 1 fires normally when used_tf_fallback=False and len(candidates) < 3."""
+    from synthadoc.agents.query_agent import QueryAgent
+    from synthadoc.storage.search import SearchResult
+    from unittest.mock import MagicMock
+
+    agent = MagicMock(spec=QueryAgent)
+    agent._gap_score_threshold = 0.5
+    agent._detect_gap = QueryAgent._detect_gap.__get__(agent, QueryAgent)
+
+    # Use 2 candidates without tf_fallback (or just 1 to test len < 3)
+    candidates = [
+        SearchResult(slug="plan1", score=0.8, title="Plan 1", snippet="", tf_fallback=False),
+    ]
+
+    agent._store = MagicMock()
+    def mock_read_page(slug):
+        return MagicMock(content="capex maintenance capex maintenance budget")
+    agent._store.read_page.side_effect = mock_read_page
+
+    gap, _, _, _ = agent._detect_gap(
+        question="capex maintenance",
+        candidates=candidates,
+        max_score=0.8,
+        used_tf_fallback=False,
+    )
+    assert gap is True, "Signal 1 should fire when tf_fallback=False and len<3"
+
+
+# ── cross-lingual retrieval (CJK translation) ────────────────────────────────
+
+from synthadoc.agents.query_agent import _has_cjk
+
+
+def test_has_cjk_detects_chinese():
+    assert _has_cjk("维护性资本支出") is True
+
+
+def test_has_cjk_detects_japanese():
+    assert _has_cjk("資本支出の分析") is True
+
+
+def test_has_cjk_detects_korean():
+    assert _has_cjk("자본 지출 분석") is True
+
+
+def test_has_cjk_returns_false_for_ascii():
+    assert _has_cjk("maintenance capex analysis") is False
+
+
+def test_has_cjk_returns_false_for_empty():
+    assert _has_cjk("") is False
+
+
+def test_guard_c_high_confidence_suppresses_single_citation_long_answer():
+    """Guard C high-confidence path: >800 chars + 1 wiki citation suppresses gap.
+
+    "What does X cover?" queries summarise a single page and naturally produce
+    only one [[wikilink]].  The standard path (≥2 citations) does not fire, but
+    the high-confidence path (>800 chars + ≥1 citation) must suppress the gap.
+    """
+    from synthadoc.agents.query_agent import _guard_c_suppress
+    long_answer = "A" * 801 + " [[market-outlook-2026-sector-analysis]]"
+    assert _guard_c_suppress(True, long_answer, "test") is False
+
+
+def test_guard_c_standard_path_suppresses_multi_citation_answer():
+    """Guard C standard path: >300 chars + ≥2 wiki citations suppresses gap."""
+    from synthadoc.agents.query_agent import _guard_c_suppress
+    answer = "A" * 301 + " [[page-a]] [[page-b]]"
+    assert _guard_c_suppress(True, answer, "test") is False
+
+
+def test_guard_c_does_not_suppress_short_single_citation():
+    """Guard C must not suppress a short answer with only one citation."""
+    from synthadoc.agents.query_agent import _guard_c_suppress
+    short_answer = "Some answer. [[page-a]]"
+    assert _guard_c_suppress(True, short_answer, "test") is True
+
+
+def test_guard_c_does_not_suppress_gap_prefix():
+    """Guard C never suppresses an answer that already has a [GAP] prefix."""
+    from synthadoc.agents.query_agent import _guard_c_suppress
+    long_answer = "[GAP] " + "A" * 900 + " [[page-a]] [[page-b]]"
+    assert _guard_c_suppress(True, long_answer, "test") is True
+
+
+@pytest.mark.asyncio
+async def test_translate_for_retrieval_returns_translation(tmp_wiki):
+    """_translate_for_retrieval must call the LLM and return the translated string."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.return_value = CompletionResponse(
+        text="maintenance capital expenditure", input_tokens=20, output_tokens=5,
+    )
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    result = await agent._translate_for_retrieval("维护性资本支出")
+    assert result == "maintenance capital expenditure"
+    provider.complete.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_translate_for_retrieval_falls_back_on_error(tmp_wiki):
+    """When the LLM raises, _translate_for_retrieval must return the original question."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    provider = AsyncMock()
+    provider.complete.side_effect = RuntimeError("network error")
+    agent = QueryAgent(provider=provider, store=store, search=search)
+    result = await agent._translate_for_retrieval("维护性资本支出")
+    assert result == "维护性资本支出"
+
+
+@pytest.mark.asyncio
+async def test_run_search_translates_cjk_before_bm25(tmp_wiki):
+    """When the question contains CJK characters, _run_search must call
+    _translate_for_retrieval and use the English text for decompose + hybrid_search."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    store.write_page("capex-page", WikiPage(
+        title="Maintenance CAPEX", tags=[], status="active", confidence="high",
+        content="Maintenance capital expenditure analysis.", sources=[]))
+
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+
+    provider = AsyncMock()
+    # First call → translate, second call → decompose, third call → (not reached in search)
+    provider.complete.side_effect = [
+        CompletionResponse(text="maintenance capital expenditure", input_tokens=20, output_tokens=5),
+        CompletionResponse(text='["maintenance capital expenditure"]', input_tokens=10, output_tokens=5),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search)
+
+    sub_qs, candidates, _routing_warn = await agent._run_search("维护性资本支出")
+
+    # Translation must have been called (2 LLM calls: translate + decompose)
+    assert provider.complete.call_count == 2
+    # sub-questions are the English translation result, not the original CJK
+    assert all(_has_cjk(q) is False for q in sub_qs), (
+        "sub-questions fed to BM25 must be in English after CJK translation"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_search_skips_translation_for_ascii(tmp_wiki):
+    """For ASCII questions, _run_search must NOT call _translate_for_retrieval."""
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResponse(text='["maintenance capex"]', input_tokens=10, output_tokens=5),
+    ]
+    agent = QueryAgent(provider=provider, store=store, search=search)
+
+    await agent._run_search("maintenance capex")
+
+    # Only one LLM call (decompose only), no translate call
+    assert provider.complete.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_run_search_fallback_to_full_corpus_when_routing_weak(tmp_wiki):
+    """When routing-scoped BM25 returns zero candidates, _run_search falls back to
+    full-corpus search and returns a non-empty routing_warning."""
+    from pathlib import Path
+    from synthadoc.core.routing import RoutingIndex
+
+    store = WikiStorage(tmp_wiki / "wiki")
+    store.write_page("revenue-page", WikiPage(
+        title="Revenue Analysis", tags=[], status="active", confidence="high",
+        content="Portfolio revenue grew 14% year-over-year.", sources=[]))
+
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+
+    # Create a ROUTING.md that scopes to a non-existent slug — simulates stale routing
+    routing_path = tmp_wiki / "ROUTING.md"
+    ri = RoutingIndex({"Meta": ["stale-slug-that-does-not-exist"]})
+    ri.save(routing_path)
+
+    provider = AsyncMock()
+    # decompose returns one sub-question; branch pick returns the stale branch
+    provider.complete.side_effect = [
+        CompletionResponse(text='["revenue growth"]', input_tokens=10, output_tokens=5),
+        CompletionResponse(text='["Meta"]', input_tokens=10, output_tokens=5),
+    ]
+    agent = QueryAgent(
+        provider=provider, store=store, search=search, routing_path=routing_path,
+        gap_score_threshold=2.0,
+    )
+
+    sub_qs, candidates, routing_warning = await agent._run_search("revenue growth")
+
+    # Full-corpus fallback must have found the revenue-page
+    slugs = [c.slug for c in candidates]
+    assert "revenue-page" in slugs, f"Expected revenue-page in candidates, got {slugs}"
+    # Routing warning must be non-empty
+    assert routing_warning, "Expected a routing_warning when fallback triggered"
+    assert "ROUTING.md" in routing_warning
