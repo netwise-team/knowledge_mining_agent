@@ -1,0 +1,60 @@
+# Index
+
+## Recently Added
+- [[coordinated-projections-multi-faceted-process-exploration]] — Coordinated Projections: Multi-Faceted Process Exploration
+- [[process-mining-healthcare-radiological-workflows]] — Process Mining for Healthcare: Radiological Workflows
+- [[event-log-extraction-clinical-narratives]] — Event Log Extraction from Clinical Narratives
+- [[sustainability-aware-process-mining]] — Sustainability-Aware Process Mining
+- [[deviation-desirability-assessment]] — Deviation Desirability Assessment in Conformance Checking
+- [[actor-enriched-throughput-time-forecasting]] — Actor-Enriched Throughput Time Forecasting in Predictive Process Monitoring
+- [[veco-multimodal-process-mining-library]] — VeCo: Multimodal Data Vectorization Library for Process Mining
+- [[conformance-checking-visualization-idioms]] — Conformance Checking Visualization Idioms and User Preferences
+- [[object-centric-distance-metric]] — Distance Metric for Object-Centric Process Mining
+- [[process-mining-handbook]] — Process Mining Handbook (LNBIP 448)
+- [[ocpm-from-time-series-sensor-data]] — Enabling Object-Centric Process Mining from Time-Series Sensor Data
+- [[process-mining-cybersecurity-attack-flow]] — Process Mining for Cybersecurity: Attack Flow Generation
+- [[process-mining-oncology-care-pathways]] — Process Mining for Oncology Care Pathways
+- [[data-quality-sensitivity-process-discovery]] — Data Quality Sensitivity in Process Discovery
+- [[llm-declarative-process-discovery-dcr-graphs]] — LLM-Based Discovery of Declarative Processes as DCR Graphs
+- [[process-mining-data-science-in-action]] — Process Mining: Data Science in Action (Second Edition)
+- [[ocpm-personal-health-management]] — Object-Centric Process Mining for Personal Health Management
+- [[z-anonymity-edge-filtering-process-mining]] — Z-Anonymity Edge Filtering for Privacy-Preserving Process Mining
+- [[teaching-process-mining-challenges]] — Challenges in Teaching Process Mining
+- [[narrative-based-predictive-process-monitoring-llm]] — Narrative-Based Predictive Process Monitoring with LLMs
+- [[streaming-process-mining-event-streams]] — Streaming Process Mining and Intentional Event Streams
+- [[process-mining-psychiatric-pharmacotherapy]] — Process Mining for Psychiatric Pharmacotherapy
+- [[probabilistic-process-trees-trace-probability]] — Trace Probability Calculation on Probabilistic Process Trees
+- [[knowledge-driven-hallucination-llm-process-modeling]] — Knowledge-Driven Hallucination in LLMs for Process Modeling
+- [[process-mining-egovernment-collaborative-choreography]] — Process Mining for e-Government Collaborative Process Choreography
+- [[streaming-object-centric-process-mining]] — Streaming Object-Centric Process Mining (SOCPM)
+- [[class-balanced-focal-loss-next-activity-prediction]] — Class-Balanced Focal Loss for Next Activity Prediction
+- [[behavioral-analytics-process-mining]] — Behavioral Analytics in Process Mining
+- [[continuumconductor-decentralized-process-mining]] — ContinuumConductor: Decentralized Process Mining on the Edge-Cloud Continuum
+- [[wearable-data-event-log-enrichment]] — Wearable Data Integration for Event Log Enrichment in Process Mining
+- [[ocpm-collection-objects-split-tree-mining]] — Object-Centric Process Mining with Collection Objects and Split-Tree Mining
+- [[object-centric-streaming-process-discovery-liss]] — Object-Centric Streaming-Based Process Discovery (Liss et al.)
+- [[partial-order-powl-process-discovery]] — Partial-Order-Based POWL Process Discovery
+- [[stochastic-process-mining-food-retail-waste-reduction]] — Stochastic Process Mining for Food Retail Waste Reduction
+- [[process-mining-workflow-documentation]] — Documenting Process Mining Workflows: Structured Logging in Educational Settings
+- [[process-scope-enrichment-ocel]] — Enriching Object-Centric Event Data with Process Scopes
+- [[process-mining-public-procurement]] — Process Mining in Public Procurement: University of Costa Rica Case Study
+- [[k-traceoids-trace-clustering]] — k-traceoids: A Structure-Preserving Trace Clustering Framework
+- [[domain-adaptation-llms-process-mining-peft]] — Domain Adaptation of LLMs for Process Mining via PEFT
+- [[imperative-to-declarative-process-query-translation]] — Bridging Imperative Process Models and Process Data Queries: Translation and Relaxation
+- [[predictive-process-monitoring-pathway-left-shifts]] — Predictive Process Monitoring for Pathway Left Shifts in Hospital Care
+- [[exoar-object-activity-recognition-ocpm]] — ExOAR: Expert-Guided Object and Activity Recognition for Object-Centric Process Mining
+- [[proactive-data-driven-business-process-scheduling]] — Proactive Data-Driven Scheduling of Business Processes
+- [[fairness-aware-process-mining]] — Fairness-Aware Process Mining
+- [[neural-network-simplification-predictive-process-monitoring]] — Neural Network Architecture Simplification for Predictive Process Monitoring
+- [[process-mining-bus-stop-congestion-monitoring]] — Process Mining for Bus Stop Congestion Monitoring
+- [[remaining-time-prediction-warehouse-case-study]] — Remaining Time Prediction in Outbound Warehouse Processes: A Case Study
+- [[federated-learning-process-mining]] — Federated Learning for Process Mining
+- [[pybeamline]] — pyBeamline
+- [[object-centric-petri-nets-discovery]] — Обнаружение объектно-ориентированных сетей Петри
+- [[opera-object-centric-performance-analysis]] — OPerA: Инструмент объектно-ориентированного анализа производительности процессов
+- [[dynamic-relationships-object-centric-event-logs]] — Обнаружение динамических связей в объектно-ориентированных журналах событий
+- [[object-centric-process-mining-ai-enabler]] — Object-Centric Process Mining как основа для генеративного, предиктивного и прескриптивного ИИ
+- [[ocel-2-specification]] — Спецификация OCEL 2.0 (Object-Centric Event Log)
+- [[ocpn-to-opid-stable-relationship-discovery]] — Обнаружение устойчивых связей в объектно-ориентированных процессах: от OCPN к OPID
+- [[pmax-agentic-framework-process-mining]] — PMAx: Агентный фреймворк для AI-управляемого процессного майнинга
+- [[promoai-pmax-ai-process-mining-suite]] — ProMoAI и PMAx: AI-инструментарий для Process Mining

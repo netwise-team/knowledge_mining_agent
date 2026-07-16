@@ -1,0 +1,50 @@
+# Index
+
+## Recently Added
+- [[process-mining-overview]] — Майнинг процессов: обзор дисциплины
+- [[multi-faceted-process-exploration]] — Многогранное исследование процессов: скоординированные проекции и визуальная аналитика
+- [[kantor-et-al-applying-process-mining-to-radiological-workflows-a-clinical-case-study]] — Kantor Et Al   Applying Process Mining To Radiological Workflows A Clinical Case Study
+- [[event-extraction-from-clinical-narratives]] — Извлечение событий из клинических нарративов
+- [[sustainability-aware-process-mining]] — Майнинг процессов с учётом устойчивого развития
+- [[deviation-desirability-assessment]] — Оценка желательности отклонений в майнинге процессов
+- [[actor-enriched-throughput-time-forecasting]] — Прогнозирование времени выполнения процессов с обогащением данными об акторах
+- [[llm-multimodal-process-mining]] — LLM и мультимодальные данные в майнинге процессов
+- [[conformance-checking-visualizations]] — Визуализации для задач проверки соответствия в майнинге процессов
+- [[object-centric-distance-metric]] — Метрика расстояния для объектно-ориентированного майнинга процессов
+- [[time-series-to-oced-for-ocpm]] — Преобразование временны́х рядов в объектно-ориентированные данные событий для OCPM
+- [[process-mining-for-cybersecurity-attack-flow]] — Майнинг процессов для кибербезопасности: генерация моделей Attack Flow
+- [[santos-et-al-process-mining-oncology-care-pathways-brazil]] — Сантос и др. — Майнинг процессов для анализа маршрутов лечения в амбулаторной онкологической клинике (Бразилия)
+- [[data-quality-sensitivity-process-discovery]] — Оценка чувствительности майнинга процессов к проблемам качества данных
+- [[llm-declarative-process-discovery-dcr]] — Извлечение декларативных процессных моделей из текста с помощью LLM
+- [[ocpm-personal-health-management]] — Объектно-ориентированный майнинг процессов для управления персональным здоровьем
+- [[edge-filtering-z-anonymity-process-mining]] — Фильтрация на краю сети: компромисс между конфиденциальностью и полезностью данных в майнинге процессов
+- [[teaching-process-mining-challenges]] — Проблемы преподавания майнинга процессов
+- [[narrative-based-predictive-process-monitoring-llm]] — Нарративный предиктивный мониторинг процессов с помощью LLM
+- [[streaming-process-mining-event-streams]] — Потоковый майнинг процессов и потоки событий
+- [[soleimani-et-al-comparative-analysis-of-pharmacotherapy-trajectories-in-treatment-resistant-and-non-resistant-depression]] — Soleimani Et Al   Comparative Analysis Of Pharmacotherapy Trajectories In Treatment Resistant And Non Resistant Depression
+- [[trace-probability-probabilistic-process-trees]] — Вычисление вероятности трассы на вероятностных деревьях процессов
+- [[knowledge-driven-hallucination-llm-process-modeling]] — Знание-обусловленные галлюцинации LLM при моделировании процессов
+- [[antunes-et-al-process-mining-for-e-government-collaborative-processes-choreography-a-case-study]] — Antunes Et Al   Process Mining For E Government Collaborative Processes Choreography A Case Study
+- [[streaming-object-centric-process-mining]] — Потоковый объектно-ориентированный майнинг процессов (SOCPM)
+- [[class-balanced-focal-loss-next-activity-prediction]] — Класс-сбалансированная фокусная функция потерь для предсказания следующей активности
+- [[behavioral-analytics-process-mining]] — Поведенческая аналитика в майнинге процессов: концептуализация и фреймворки
+- [[reiter-et-al-continuumconductor-decentralized-process-mining-on-the-edge-cloud-continuum]] — Reiter Et Al   Continuumconductor Decentralized Process Mining On The Edge Cloud Continuum
+- [[wearable-data-enrichment-process-mining]] — Обогащение журналов событий данными носимых устройств в майнинге процессов
+- [[go-tte-et-al-process-mining-for-object-oriented-processes-with-dynamic-temporal-relations]] — GöTte Et Al   Process Mining For Object Oriented Processes With Dynamic Temporal Relations
+- [[partial-order-process-discovery-powl]] — Обнаружение процессов на основе частичных порядков с использованием POWL
+- [[kalenkova-et-al-discovering-and-analyzing-stochastic-processes-to-reduce-waste-in-food-retail]] — Kalenkova Et Al   Discovering And Analyzing Stochastic Processes To Reduce Waste In Food Retail
+- [[process-mining-workflow-documentation]] — Документирование рабочих процессов майнинга процессов: структурированное логирование
+- [[process-scope-enrichment-ocel]] — Обогащение объектно-ориентированных данных событий областями процессов (POCEL)
+- [[process-mining-public-procurement-university-costa-rica]] — Майнинг процессов в государственных закупках: кейс Университета Коста-Рики
+- [[k-traceoids-trace-clustering]] — k-traceoids: Структурно-сохраняющий фреймворк кластеризации трасс
+- [[llm-domain-adaptation-peft-ppm]] — Доменная адаптация LLM для данных процессов (PEFT для PPM)
+- [[imperative-to-declarative-process-model-translation]] — Перевод императивных процессных моделей в декларативные ограничения и запросы к данным
+- [[aljebreen-et-al-predicting-pathway-left-shifts-in-hospital-care-using-predictive-process-monitoring]] — Aljebreen Et Al   Predicting Pathway Left Shifts In Hospital Care Using Predictive Process Monitoring
+- [[exoar-expert-guided-object-activity-recognition]] — ExOAR: экспертно-управляемое распознавание объектов и активностей из текстовых данных
+- [[go-mez-noe-et-al-extraction-and-identification-of-medications-from-ehr-notes-with-llms-a-tool-and-a-case-study]] — GóMez Noé Et Al   Extraction And Identification Of Medications From Ehr Notes With Llms   A Tool And A Case Study
+- [[proactive-process-scheduling]] — Проактивное планирование бизнес-процессов на основе данных
+- [[fairness-aware-process-mining]] — Майнинг процессов с учётом справедливости
+- [[neural-network-simplification-predictive-process-monitoring]] — Упрощение архитектур нейронных сетей для предиктивного мониторинга процессов
+- [[process-mining-bus-stop-congestion]] — Мониторинг загруженности автобусных остановок на основе алгоритмов обнаружения процессов
+- [[remaining-time-prediction-process-mining]] — Предсказание оставшегося времени в процессном майнинге
+- [[federated-learning-process-mining]] — Федеративное обучение в процессном майнинге

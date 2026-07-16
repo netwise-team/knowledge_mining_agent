@@ -1,0 +1,191 @@
+{
+  "by_mode": {
+    "NEW_WIKI": [
+      "How do I ingest my first document?",
+      "What sources can Synthadoc ingest?",
+      "How do I set up a scheduled ingest?",
+      "Ingest a URL into my wiki",
+      "Run scaffold to generate starter pages",
+      "Run Synthadoc status"
+    ],
+    "EXPLORER": [
+      "What topics does this wiki cover?",
+      "What are the key topics in this wiki?",
+      "Show wiki status",
+      "Run Synthadoc status",
+      "What are the stale pages in my wiki?",
+      "What pages are orphan pages?",
+      "Ingest a new source into the wiki",
+      "Run a full lint check",
+      "Show my lint report"
+    ],
+    "HEALTH_CHECK": [
+      "Show wiki status",
+      "Run Synthadoc status",
+      "Show my lint report",
+      "Which pages are marked stale?",
+      "What pages are orphan pages?",
+      "List contradicted pages",
+      "Which pages have adversarial warnings?",
+      "Which sources were truncated?",
+      "Show me recently updated wiki pages",
+      "Show me recently archived wiki pages",
+      "How do I run a lint check?",
+      "Run lint with auto-resolve enabled",
+      "Show my scheduled tasks"
+    ],
+    "POWER_USER": [
+      "What changed in the wiki this week?",
+      "What changed in the wiki this month?",
+      "What pages were added this year?",
+      "Show me recently updated wiki pages",
+      "Show me recently archived wiki pages",
+      "Show my lint report",
+      "Which pages have adversarial warnings?",
+      "Which sources were truncated?",
+      "What pages are orphan pages?",
+      "List contradicted pages",
+      "Run Synthadoc status",
+      "Activate a draft page",
+      "Archive a stale page",
+      "Restore an archived page to draft",
+      "Export my wiki as llms.txt",
+      "Run lint on contradictions only",
+      "Schedule a daily ingest at 6 AM",
+      "Schedule scaffold every Sunday at 11 PM",
+      "Schedule lint run every night at 9 PM",
+      "Rebuild the wiki scaffold",
+      "Show me job status",
+      "List all jobs",
+      "Show failed and skipped jobs"
+    ]
+  },
+  "topic_patterns": [
+    {
+      "keywords": ["stale", "outdated", "old"],
+      "answer_keywords": ["stale"],
+      "hints": [
+        "How do I mark a page as active?",
+        "How do I run a lint check?",
+        "Which pages need review?"
+      ]
+    },
+    {
+      "keywords": ["ingest", "pdf", "url"],
+      "answer_keywords": ["ingest"],
+      "hints": [
+        "What file types can I ingest?",
+        "How do I bulk ingest?",
+        "How do I re-ingest with --force?"
+      ]
+    },
+    {
+      "keywords": ["export", "llms", "graph", "json"],
+      "answer_keywords": ["export", "llms"],
+      "hints": [
+        "Export as llms.txt for AI tools",
+        "Export as GraphML",
+        "Filter export by lifecycle state"
+      ]
+    },
+    {
+      "keywords": ["lifecycle", "active", "archive", "archived", "draft", "restore", "activate"],
+      "answer_keywords": ["lifecycle", "archived", "restore", "activate"],
+      "hints": [
+        "Show me recently updated wiki pages",
+        "Show me recently archived wiki pages",
+        "Activate a draft page",
+        "Archive a stale page",
+        "Restore an archived page to draft",
+        "What is candidates staging?",
+        "Show wiki status",
+        "How do lifecycle states work?"
+      ]
+    },
+    {
+      "keywords": ["orphan", "no inbound", "isolated", "unlinked"],
+      "answer_keywords": ["no inbound"],
+      "hints": [
+        "What pages are orphan pages?",
+        "Run lint on orphans only",
+        "Show my lint report"
+      ]
+    },
+    {
+      "keywords": ["lint", "contradiction", "dangling"],
+      "answer_keywords": ["lint", "dangling"],
+      "hints": [
+        "What pages are orphan pages?",
+        "List contradicted pages",
+        "Show adversarial warnings",
+        "Which sources were truncated?",
+        "Run lint on contradictions only",
+        "Run lint with auto-resolve enabled",
+        "How do I run a lint check?",
+        "Show my lint report"
+      ]
+    },
+    {
+      "keywords": ["truncated", "truncation", "max_source_chars", "source limit"],
+      "answer_keywords": ["truncated", "max_source_chars"],
+      "hints": [
+        "Which sources were truncated?",
+        "Show my lint report",
+        "How do I re-ingest with --force?"
+      ]
+    },
+    {
+      "keywords": ["schedule", "scheduled", "recurring", "cron"],
+      "answer_keywords": ["cron"],
+      "hints": [
+        "Show my scheduled tasks",
+        "Schedule scaffold every Sunday at 11 PM",
+        "Schedule lint run every night at 9 PM",
+        "Schedule a daily ingest at 6 AM"
+      ]
+    },
+    {
+      "keywords": ["scaffold", "template", "structure"],
+      "answer_keywords": ["scaffold"],
+      "hints": [
+        "Rebuild the wiki scaffold",
+        "What does scaffold generate?",
+        "Run scaffold to update templates"
+      ]
+    },
+    {
+      "keywords": ["adversarial", "warning", "flagged", "overstated", "claim concern"],
+      "answer_keywords": ["adversarial", "claim concern"],
+      "hints": [
+        "Which pages have adversarial warnings?",
+        "Show adversarial warnings",
+        "What pages are orphan pages?",
+        "Run the adversarial lint pass",
+        "How do I review a flagged claim?"
+      ]
+    },
+    {
+      "keywords": ["job", "jobs", "ingest status", "lint status", "background", "running", "failed job", "pending job"],
+      "answer_keywords": ["ingest status", "lint status"],
+      "hints": [
+        "Show me job status",
+        "List all jobs",
+        "Show failed and skipped jobs",
+        "Show pending jobs",
+        "Check job status"
+      ]
+    },
+    {
+      "keywords": ["changed", "updated", "re-ingested", "ingested", "added", "archived", "recently", "this week", "this month", "this year"],
+      "answer_keywords": ["re-ingested"],
+      "hints": [
+        "What changed in the wiki this week?",
+        "What changed in the wiki this month?",
+        "Show me recently updated wiki pages",
+        "Show me recently archived wiki pages",
+        "What pages were added in the last 3 months?",
+        "What pages were added this year?"
+      ]
+    }
+  ]
+}

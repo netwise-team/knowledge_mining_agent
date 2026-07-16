@@ -1,0 +1,4 @@
+.synthadoc/
+__pycache__/
+*.pyc
+.env
