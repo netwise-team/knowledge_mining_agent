@@ -3,34 +3,16 @@ import os
 import sys
 import json
 import time
-import shutil
 import requests
 from pathlib import Path
 from datetime import datetime
 
+
 BASE_URL = 'http://localhost:8765'
-OUROBOROS_APP_ROOT = Path.home() / 'Ouroboros'
-
-
-print('=' * 50, ' BOOTSTRAP START ', '=' * 50)
-# Copy skills into Ouroboros skills folder
-def copy_skills():
-    src = Path("skills")
-    dst = OUROBOROS_APP_ROOT / "data" / "skills" / "external"
-
-    for item in src.iterdir():
-        target = dst / item.name
-        print(f'Copying {target.name}...')
-
-        if item.is_dir():
-            shutil.copytree(item, target, dirs_exist_ok=True)
-        else:
-            shutil.copy2(item, target)
-    print('=' * 50, ' SKILLS COPIED ', '=' * 50)
 
 # Set up Synthadoc
-# Prepare config
 def synthadoc_setup():
+    print('=' * 50, ' START SYNTADOC SETUP ', '=' * 50)
     provider = input('Input provider (openrouter/cloudru): ')
     model = input('Input model: ')
 
@@ -101,14 +83,35 @@ def mcp_setup():
     payload = {'MCP_SERVERS': mcp_config}
     set_mcp_server_resp = requests.post(f'{BASE_URL}/api/settings', json=payload)
     if set_mcp_server_resp.status_code == 200:
-        print('=' * 50, ' SYNTHADOC MCP SET ', '=' * 50)
+        print('Syntadoc MCP setup complete')
     else:
         print(set_mcp_server_resp.json()['error'])
+        return True
+    enable_mcp_clint_resp = requests.post(f'{BASE_URL}/api/settings', json={"MCP_ENABLED": True})
+    if enable_mcp_clint_resp.status_code == 200:
+        print('MCP Client enabled')
+    else:
+        print(f"Error enabling MCP client: {enable_mcp_clint_resp.json()['error']}")
+        return True
+    
+    print('=' * 50, ' SYNTHADOC MCP ONLINE ', '=' * 50)
+    return False
           
 # Enable skills
 def enable_skills():
+
+    skills_route = Path('skills').resolve()
+
+    set_repo_resp = requests.post(f'{BASE_URL}/api/settings', json={'OUROBOROS_SKILLS_REPO_PATH': str(skills_route)})
+
+    if set_repo_resp.status_code != 200:
+        print('Failed to set repo path. Is Ouroboros enabled?')
+        return True
+    
+    print('=' * 50, ' SKILLS INSTALLED ', '=' * 50) 
+
     resp = requests.post(f"{BASE_URL}/api/tasks", json={
-        "message": "Install and enable all of skills",
+        "message": "Install, review and enable all of skills you found. IF there are any blockers - fix it.",
         "title": "Skill enabling",
         "description": "Skill enabling"
     })
@@ -124,12 +127,12 @@ def enable_skills():
             print('Current status: ' + resp.json()['status'])
             time.sleep(5)
         elif resp.json()['status'] == 'failed':
-            print('=' * 50, ' FAILED TO INSTALL SKILLS ', '=' * 50)
+            print('=' * 50, ' FAILED TO ENABLE SKILLS ', '=' * 50)
             return True
         else:
             tg_token = input("Skills installation launched successfully. Input Telegram token: ")
             requests.post(f"{BASE_URL}/api/settings", json={"TELEGRAM_BOT_TOKEN": f"{tg_token}" })
-            print('=' * 50, ' SETUP COMPLETE ', '=' * 50) 
+            print('=' * 50, ' SKILLS ENABLED ', '=' * 50) 
             return False
 
 if __name__ == '__main__':
@@ -140,25 +143,24 @@ if __name__ == '__main__':
         print('Venv not found. Please run the script from venv.')
         sys.exit(1)
     
-    if not os.environ('OPENAI_API_KEY'):
+    if not os.getenv('OPENAI_API_KEY'):
         print('OpenAI key is not set. Please set OPENAI_API_KEY before bootstrapping. Shutting down...')
         sys.exit(1)
     
-    ops = [copy_skills, synthadoc_setup, mcp_setup, enable_skills]
+    ops = [synthadoc_setup, mcp_setup, enable_skills]
 
     GREETING = """
 Welcome to Knowledge Mining Agent bootstrap utility!
 Choose operation:
-1. Copy skills
-2. Setup Sythadoc
-3. Add Syntadoc MCP server
-4. Enable skills
+1. Setup Sythadoc
+2. Add Syntadoc MCP server
+3. Enable skills
 0. Do a full bootstrap
     """
     print(GREETING)
     choice = input('Choose next action: ')
 
-    if choice not in '12340' and len(choice) != 1:
+    if choice not in '1230' or len(choice) != 1:
         print('Wrong action. Shutting down...')
         sys.exit(1)
     
