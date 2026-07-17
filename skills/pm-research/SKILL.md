@@ -1,7 +1,7 @@
 ---
 name: pm-research
 description: Search, download, and ingest Process Mining research papers from IEEE Xplore, ArXiv, Google Scholar, and Semantic Scholar into a Synthadoc knowledge base.
-version: 0.2.0
+version: 0.2.1
 type: script
 scripts:
   - name: fetch_pm_papers.py

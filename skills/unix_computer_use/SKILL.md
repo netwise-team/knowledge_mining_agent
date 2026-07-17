@@ -1,7 +1,7 @@
 ---
 name: unix_computer_use
 description: macOS/Linux desktop observation and input tools with coordinate normalization for supervised local computer-use workflows.
-version: 0.2.0
+version: 0.2.1
 type: extension
 entry: plugin.py
 runtime: python3

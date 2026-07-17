@@ -1,6 +1,8 @@
 # Knowledge Mining Agent
 ![](https://giga.chat/files/public/generated/df0139f8-b44b-441c-b5dc-d45b471c2bff)
 
+![version](https://img.shields.io/badge/version-6.56.3-blue)
+
 **Автономный ИИ-агент для управления базой знаний.**
 
 **Knowledge Mining Agent** -  это самосовершенствующийся ИИ-агент со специализацией в Process Mining. Он самостоятельно ищет, анализирует и сохраняет академические статьи, GitHub-репозитории и знания по процессному анализу в структурированную базу знаний (wiki).  
@@ -162,6 +164,15 @@ ouroboros server
 Запушьте ветку: git push origin feature/new-tool.  
 Откройте Pull Request в ветку main.  
 Пожалуйста, убедитесь, что ваш код соответствует стилю проекта (используйте flake8 и black) и покрыт тестами.  
+
+---
+
+## 📝 Changelog
+
+| Version | Changes |
+|---------|---------|
+| 6.56.3 | Fix skill review blockers: unix_computer_use missing `runtime` field, pm-research path confinement + externalIds crash fix + OPENROUTER_API_KEY env declaration. Bump both skill versions to 0.2.1. |
+| 6.56.2 | Prior release. |
 
 ---
 
