@@ -11,6 +11,8 @@ timeout_sec: 300
 permissions:
   - net
   - fs
+env_from_settings:
+  - OPENROUTER_API_KEY
 when_to_use: User asks to find, download, or collect Process Mining papers, or to populate/update the pm-research knowledge base with academic articles.
 keywords:
   - process mining

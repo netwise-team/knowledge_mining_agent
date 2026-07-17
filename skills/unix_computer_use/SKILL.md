@@ -4,6 +4,7 @@ description: macOS/Linux desktop observation and input tools with coordinate nor
 version: 0.2.0
 type: extension
 entry: plugin.py
+runtime: python3
 permissions: [tool, subprocess]
 env_from_settings: []
 when_to_use: The user asks Ouroboros to inspect the desktop, take a screenshot, click/type/press keys, drag, or operate a local GUI under explicit human supervision.

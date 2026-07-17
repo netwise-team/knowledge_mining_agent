@@ -319,10 +319,10 @@ def search_semantic_scholar(keywords, since_year, max_results=20):
             oa = item.get("openAccessPdf")
             if not oa or not oa.get("url"):
                 continue
-            ext_ids = item.get("externalIds", {})
+            ext_ids = item.get("externalIds") or {}
             arxiv_id = ext_ids.get("ArXiv")
             title = item.get("title", "Untitled")
-            corpus_id = str(ext_ids.get("CorpusId", "x"))
+            corpus_id = str(item.get("corpusId") or ext_ids.get("CorpusId") or "x")
             papers.append({
                 "source": "semantic_scholar",
                 "id": arxiv_id or corpus_id, "title": title,
@@ -392,13 +392,35 @@ def main():
     keywords = [k.strip() for k in args.keywords.split(",") if k.strip()]
 
     if args.output_dir is not None:
-        output_dir = Path(args.output_dir)
+        requested = Path(args.output_dir)
+        # Confine --output-dir to the skill state directory: reject absolute
+        # paths and parent traversal, then resolve under downloads/.
+        if requested.is_absolute() or ".." in requested.parts:
+            print(json.dumps({"error": "--output-dir must be a relative path "
+                                 "without '..' traversal; got: " + args.output_dir}),
+                  file=sys.stderr)
+            sys.exit(1)
+        if "OUROBOROS_SKILL_STATE_DIR" in os.environ:
+            output_dir = Path(os.environ["OUROBOROS_SKILL_STATE_DIR"]) / "downloads" / requested
+        else:
+            print(json.dumps({"error": "OUROBOROS_SKILL_STATE_DIR not set; "
+                                 "cannot resolve relative --output-dir."}),
+                  file=sys.stderr)
+            sys.exit(1)
     elif "OUROBOROS_SKILL_STATE_DIR" in os.environ:
         output_dir = Path(os.environ["OUROBOROS_SKILL_STATE_DIR"]) / "downloads"
     else:
         print(json.dumps({"error": "OUROBOROS_SKILL_STATE_DIR not set and --output-dir not provided."}),
               file=sys.stderr)
         sys.exit(1)
+
+    # Final confinement check: resolved path must stay inside the skill state dir.
+    if "OUROBOROS_SKILL_STATE_DIR" in os.environ:
+        skill_root = Path(os.environ["OUROBOROS_SKILL_STATE_DIR"]).resolve()
+        if not str(output_dir.resolve()).startswith(str(skill_root) + os.sep):
+            print(json.dumps({"error": "Resolved output directory escapes the skill state directory."}),
+                  file=sys.stderr)
+            sys.exit(1)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     sources = [s.strip() for s in args.sources.split(",")]
