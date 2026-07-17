@@ -1,7 +1,7 @@
 # Knowledge Mining Agent
 ![](https://giga.chat/files/public/generated/df0139f8-b44b-441c-b5dc-d45b471c2bff)
 
-![version](https://img.shields.io/badge/version-6.56.3-blue)
+![version](https://img.shields.io/badge/version-6.56.4-blue)
 
 **Автономный ИИ-агент для управления базой знаний.**
 
@@ -171,6 +171,7 @@ ouroboros server
 
 | Version | Changes |
 |---------|---------|
+| 6.56.4 | Enable all 6 skills (pm-identity, telegram-bridge, pm-github-knowledge-extractor, pm-wiki, pm-research, unix_computer_use). Fix pm-research urllib.parse.quote crash, PDF validation in deduplicate, remove overbroad fs permission. Bump pm-research to 0.2.2. |
 | 6.56.3 | Fix skill review blockers: unix_computer_use missing `runtime` field, pm-research path confinement + externalIds crash fix + OPENROUTER_API_KEY env declaration. Bump both skill versions to 0.2.1. |
 | 6.56.2 | Prior release. |
 
