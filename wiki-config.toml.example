@@ -12,7 +12,7 @@ port = 7070  # change this if running multiple wikis simultaneously
 [agents]
 default = {{ provider = "{prvdr}", model = "{mdl}", base_url = "{burl}" }}
 
-#
+
 # LLM call timeout — useful for reasoning models (e.g. MiniMax-M2.5, MiniMax-M3 with thinking enabled) that can
 # spend 2+ minutes on a single prompt and return an empty response instead of
 # raising an error.  Setting this causes synthadoc to fail fast with a clear
