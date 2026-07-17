@@ -22,6 +22,7 @@ import os
 import re
 import time
 import urllib.request
+import urllib.parse
 import urllib.error
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -257,7 +258,7 @@ def safe_filename(name, max_len=50):
 
 def search_arxiv(keywords, since_year, max_results=20):
     query = " AND ".join('all:"' + kw + '"' for kw in keywords)
-    url = (ARXIV_API + "?search_query=" + urllib.request.quote(query)
+    url = (ARXIV_API + "?search_query=" + urllib.parse.quote(query)
            + "&sortBy=submittedDate&sortOrder=descending&max_results=" + str(max_results))
     try:
         data = http_get(url)
@@ -307,7 +308,7 @@ def search_arxiv_per_keyword(keywords, since_year, max_per_kw=10):
 
 def search_semantic_scholar(keywords, since_year, max_results=20):
     query = " ".join(keywords)
-    url = (SEMANTIC_SCHOLAR_API + "?query=" + urllib.request.quote(query)
+    url = (SEMANTIC_SCHOLAR_API + "?query=" + urllib.parse.quote(query)
            + "&year=" + str(since_year) + "-2026&fieldsOfStudy=Computer+Science"
            + "&limit=" + str(max_results)
            + "&fields=title,externalIds,openAccessPdf,abstract,year")
@@ -373,6 +374,15 @@ def deduplicate(papers, output_dir):
         filepath = output_dir / (p.get("source", "unknown") + "_pdfs") / p["filename"]
         if not filepath.exists():
             result.append(p)
+        else:
+            # Validate the existing file is a real PDF — a stale HTML/paywall
+            # file must be re-downloaded, not silently skipped.
+            try:
+                with open(filepath, "rb") as f:
+                    if not is_valid_pdf(f.read(4)):
+                        result.append(p)
+            except Exception:
+                result.append(p)
     return result
 
 
