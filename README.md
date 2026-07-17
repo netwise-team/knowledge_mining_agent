@@ -12,6 +12,21 @@
 
 ## 1. 🚀 Быстрый старт
 
+### Шаг 0: Настройте ключ API
+Наш агент поддерживает два провайдера: Cloud.ru Foundational Models и OpenRouter. Тем не менее, в связи с конвенцией наименования в переменные среды необходимо прописать OPENAI_API_KEY.
+
+Для Windows:
+
+```powershell
+$env:OPENAI_API_KEY="<ключ>"
+```
+
+Для Linux/MacOS
+
+```bash
+OPENAI_API_KEY="<ключ>"
+```
+
 ### Шаг 1: Клонируйте репозиторий
 ```bash
 git clone https://github.com/netwise-team/knowledge_mining_agent.git
