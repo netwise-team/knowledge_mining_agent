@@ -43,7 +43,20 @@ python -m pip install -r requirements.txt
 python -m pip install -e . --no-deps
 ```
 
-### Шаг 3: Запустите агента и UI
+### Шаг 3: Установите и запустите Synthadoc
+```bash
+git clone https://github.com/axoviq-ai/synthadoc.git
+cd synthadoc            # каталог, где лежит pyproject.toml
+pip install -e ".[dev]"
+synthadoc --version     # проверка
+```
+
+> `-e` важно: без него запускается копия из `site-packages`, и наши правки
+> (в т.ч. русский язык) работать не будут. Проверить, откуда грузится код:
+> `python -c "import synthadoc; print(synthadoc.__file__)"` — путь должен вести
+> в клонированный репозиторий, а не в `site-packages`.
+
+### Шаг 4: Запустите агента и UI
 ```bash
 ouroboros server
 ```
@@ -55,6 +68,10 @@ ouroboros server
 * Безопасность и бюджет
 * Сеть и сервер
 * Навыки, в т.ч. бот Telegram
+
+### Шаг 5. Запустите bootstrap.py
+Скрипт проведет вас через запуск и соединение Synthadoc с моделями, включения MCP-клиента, настройки его на сервер Synthadoc и установки и верификации поставляемых навыков.
+
 ---
 
 ## 2. 🧠 Возможности агента
