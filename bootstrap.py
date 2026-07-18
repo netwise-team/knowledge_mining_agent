@@ -53,6 +53,7 @@ def synthadoc_setup():
 
     global_config['pm-wiki'] = global_config_entry
 
+    os.makedirs(wikis_path.parent, exist_ok=True)
     with open(wikis_path, 'w', encoding='utf8') as global_config_file_w:
         json.dump(global_config, global_config_file_w)
 
@@ -155,17 +156,22 @@ Choose operation:
 1. Setup Sythadoc
 2. Add Syntadoc MCP server
 3. Enable skills
-0. Do a full bootstrap
+4. Do a full bootstrap
+0. Exit
     """
     print(GREETING)
-    choice = input('Choose next action: ')
+    while True:
+        choice = input('Choose next action: ')
 
-    if choice not in '1230' or len(choice) != 1:
-        print('Wrong action. Shutting down...')
-        sys.exit(1)
-    
-    if choice == '0':
-        for op in ops:
-            op()
-    else:
-        ops[int(choice) - 1]()
+        if choice not in '12340' or len(choice) != 1:
+            print('Wrong action. Try again.')
+            continue
+        
+        if choice == '4':
+            for op in ops:
+                op()
+        elif choice == '0':
+            print('Exiting...')
+            sys.exit(0)
+        else:
+            ops[int(choice) - 1]()
