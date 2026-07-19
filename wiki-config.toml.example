@@ -1,0 +1,69 @@
+# synthadoc per-project configuration
+
+[wiki]
+domain = "Process Mining"
+language = "Russian"
+
+[server]
+port = 7070  # change this if running multiple wikis simultaneously
+# host = "0.0.0.0"  # bind to all interfaces — no built-in auth, restrict via firewall
+# job_timeout_seconds = 600  # max seconds a single job runs before being killed (default: 600)
+
+[agents]
+default = {{ provider = "{prvdr}", model = "{mdl}", base_url = "{burl}" }}
+
+
+# LLM call timeout — useful for reasoning models (e.g. MiniMax-M2.5, MiniMax-M3 with thinking enabled) that can
+# spend 2+ minutes on a single prompt and return an empty response instead of
+# raising an error.  Setting this causes synthadoc to fail fast with a clear
+# log message so you know to adjust the model or prompt size.
+# 0 = no limit (provider default).  Restart the server after changing.
+# llm_timeout_seconds = 90
+
+[ingest]
+max_pages_per_ingest = 15
+# Citation pass (Pass 4) tuning — these two settings work together:
+#   citation_source_lines — how many lines of the source the LLM sees when placing ^[...] markers.
+#                           Increase if lint reports out_of_range on long sources (transcripts, PDFs).
+#   citation_max_tokens   — output token budget for the annotated section returned by the LLM.
+#                           Increase if you raise citation_source_lines and have long wiki sections.
+# citation_source_lines = 400
+# citation_max_tokens = 8192
+
+[cost]
+soft_warn_usd = 0.50
+hard_gate_usd = 2.00
+
+[logs]
+# Console log level shown in the terminal when running 'synthadoc serve'.
+# DEBUG | INFO | WARNING | ERROR  (default: INFO)
+level = "INFO"
+
+# Rotating log file settings for .synthadoc/logs/synthadoc.log
+# max_file_mb  — size limit per file before rotation (default: 5 MB)
+# backup_count — number of rotated files to keep, so total ≈ max_file_mb × backup_count
+#                e.g. 5 MB × 5 = ~25 MB maximum on disk
+max_file_mb  = 5
+backup_count = 5
+
+[lint]
+# Maximum number of adversarial concerns flagged per page (default: 2).
+# Raise to 3-5 for a more thorough review; lower to 1 for a tighter signal-to-noise ratio.
+adversarial_max_per_page = 2
+# Maximum number of pages reviewed concurrently during adversarial pass (default: 8).
+# Lower to 2-4 on free-tier or rate-limited LLM providers; raise to 16+ on paid tiers.
+adversarial_concurrency = 8
+
+[search]
+vector = false             # set to true to enable semantic re-ranking (downloads ~130 MB model once)
+vector_top_candidates = 20
+
+[chat]
+# Number of recent conversation turns kept in memory for multi-turn queries (0 = disabled).
+conversation_history_turns = 5
+# Days before inactive sessions are pruned from the audit log.
+session_retention_days = 30
+# How many assistant turns to scan back to find an open clarify context.
+# Increase if users pick chips from a long multi-step clarify list; lower to
+# avoid routing unrelated follow-ups through the action agent.
+# clarify_lookback = 5

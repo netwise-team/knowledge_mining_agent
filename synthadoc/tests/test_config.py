@@ -1,0 +1,300 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Paul Chen / axoviq.com
+import pytest
+from pathlib import Path
+from synthadoc.config import Config, AgentConfig, load_config, ChatConfig
+
+
+def test_load_minimal_config(tmp_path):
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text('[agents]\ndefault = { provider = "anthropic", model = "claude-opus-4-6" }\n')
+    cfg = load_config(project_config=cfg_file)
+    assert cfg.agents.default.provider == "anthropic"
+    assert cfg.agents.default.model == "claude-opus-4-6"
+
+
+def test_agent_override_inherits_default(tmp_path):
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text(
+        '[agents]\ndefault = { provider = "anthropic", model = "claude-opus-4-6" }\n'
+        'lint = { model = "claude-haiku-4-5" }\n'
+    )
+    cfg = load_config(project_config=cfg_file)
+    lint = cfg.agents.resolve("lint")
+    assert lint.provider == "anthropic"
+    assert lint.model == "claude-haiku-4-5"
+
+
+def test_agent_thinking_disabled_parsed(tmp_path):
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text(
+        '[agents]\ndefault = { provider = "minimax", model = "MiniMax-M3", thinking = "disabled" }\n'
+    )
+    cfg = load_config(project_config=cfg_file)
+    assert cfg.agents.default.thinking == "disabled"
+
+
+def test_agent_thinking_defaults_to_empty(tmp_path):
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text('[agents]\ndefault = { provider = "minimax", model = "MiniMax-M3" }\n')
+    cfg = load_config(project_config=cfg_file)
+    assert cfg.agents.default.thinking == ""
+
+
+def test_agent_thinking_invalid_value_raises(tmp_path):
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text(
+        '[agents]\ndefault = { provider = "minimax", model = "MiniMax-M3", thinking = "always" }\n'
+    )
+    with pytest.raises(Exception, match="Invalid thinking value"):
+        load_config(project_config=cfg_file)
+
+
+def test_agent_thinking_propagates_through_resolve(tmp_path):
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text(
+        '[agents]\ndefault = { provider = "minimax", model = "MiniMax-M3", thinking = "disabled" }\n'
+        'query = { model = "MiniMax-M3" }\n'
+    )
+    cfg = load_config(project_config=cfg_file)
+    resolved = cfg.agents.resolve("query")
+    assert resolved.thinking == "disabled"
+
+
+def test_cost_defaults():
+    cfg = load_config()
+    assert cfg.cost.soft_warn_usd == 0.50
+    assert cfg.cost.hard_gate_usd == 2.00
+    assert cfg.cost.auto_resolve_confidence_threshold == 0.85
+
+
+def test_ingest_defaults():
+    cfg = load_config()
+    assert cfg.ingest.max_pages_per_ingest == 15
+
+
+def test_queue_defaults():
+    cfg = load_config()
+    assert cfg.queue.max_parallel_ingest == 4
+    assert cfg.queue.max_retries == 3
+    assert cfg.queue.backoff_base_seconds == 5
+
+
+def test_unlimited_wikis(tmp_path):
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text(
+        '[wikis]\nresearch = "~/wikis/research"\nwork = "~/wikis/work"\n'
+        'life = "~/wikis/life"\nhobby = "~/wikis/hobby"\nhealth = "~/wikis/health"\n'
+    )
+    cfg = load_config(project_config=cfg_file)
+    assert len(cfg.wikis) == 5
+    assert "life" in cfg.wikis
+    assert "hobby" in cfg.wikis
+
+
+def test_project_config_overrides_global(tmp_path):
+    global_cfg = tmp_path / "global.toml"
+    project_cfg = tmp_path / "project.toml"
+    global_cfg.write_text('[agents]\ndefault = { provider = "anthropic", model = "claude-opus-4-6" }\n')
+    project_cfg.write_text('[agents]\ndefault = { provider = "openai", model = "gpt-4o" }\n')
+    cfg = load_config(global_config=global_cfg, project_config=project_cfg)
+    assert cfg.agents.default.provider == "openai"
+    assert cfg.agents.default.model == "gpt-4o"
+
+
+def test_missing_agents_default_raises(tmp_path):
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text('[cost]\nsoft_warn_usd = 0.10\n')
+    with pytest.raises(ValueError, match="agents.default"):
+        load_config(global_config=cfg_file)
+
+
+def test_invalid_provider_name_raises(tmp_path):
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text('[agents]\ndefault = { provider = "notareal", model = "x" }\n')
+    with pytest.raises(ValueError, match="Unknown provider"):
+        load_config(global_config=cfg_file)
+
+
+def test_query_config_defaults():
+    """Config must expose query.gap_score_threshold with default 2.0."""
+    cfg = load_config()
+    assert hasattr(cfg, "query")
+    assert cfg.query.gap_score_threshold == 2.0
+
+
+def test_query_config_can_be_set_from_toml():
+    import tempfile, os
+    from pathlib import Path
+    toml = b'[agents.default]\nprovider = "anthropic"\nmodel = "claude-haiku-4-5-20251001"\n[query]\ngap_score_threshold = 1.5\n'
+    with tempfile.NamedTemporaryFile(suffix=".toml", delete=False) as f:
+        f.write(toml)
+        path = Path(f.name)
+    try:
+        cfg = load_config(project_config=path)
+        assert cfg.query.gap_score_threshold == 1.5
+    finally:
+        os.unlink(path)
+
+
+def test_search_config_defaults_to_vector_false(tmp_path):
+    cfg = load_config()
+    assert cfg.search.vector is False
+    assert cfg.search.vector_top_candidates == 20
+
+def test_search_config_vector_true_parsed(tmp_path):
+    toml = tmp_path / "config.toml"
+    toml.write_text(
+        '[agents]\ndefault = {provider = "gemini", model = "gemini-2.0-flash"}\n'
+        '[search]\nvector = true\nvector_top_candidates = 30\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(project_config=toml)
+    assert cfg.search.vector is True
+    assert cfg.search.vector_top_candidates == 30
+
+
+def test_llm_timeout_seconds_default_is_zero(tmp_path):
+    """llm_timeout_seconds defaults to 0 (no limit) when not set."""
+    toml = tmp_path / "config.toml"
+    toml.write_text('[agents]\ndefault = {provider = "gemini", model = "gemini-2.5-flash-lite"}\n')
+    cfg = load_config(project_config=toml)
+    assert cfg.agents.llm_timeout_seconds == 0
+
+
+def test_llm_timeout_seconds_is_parsed(tmp_path):
+    """llm_timeout_seconds is read from [agents] and exposed on AgentsConfig."""
+    toml = tmp_path / "config.toml"
+    toml.write_text(
+        '[agents]\ndefault = {provider = "gemini", model = "gemini-2.5-flash-lite"}\n'
+        'llm_timeout_seconds = 90\n'
+    )
+    cfg = load_config(project_config=toml)
+    assert cfg.agents.llm_timeout_seconds == 90
+
+
+def test_deepseek_is_a_valid_provider(tmp_path):
+    """deepseek must be accepted as a valid provider name without raising."""
+    toml = tmp_path / "config.toml"
+    toml.write_text('[agents]\ndefault = {provider = "deepseek", model = "deepseek-chat"}\n')
+    cfg = load_config(project_config=toml)
+    assert cfg.agents.default.provider == "deepseek"
+    assert cfg.agents.default.model == "deepseek-chat"
+
+
+def test_qwen_is_a_valid_provider(tmp_path):
+    """qwen must be accepted as a valid provider name without raising."""
+    toml = tmp_path / "config.toml"
+    toml.write_text('[agents]\ndefault = {provider = "qwen", model = "qwen-plus"}\n')
+    cfg = load_config(project_config=toml)
+    assert cfg.agents.default.provider == "qwen"
+    assert cfg.agents.default.model == "qwen-plus"
+
+
+def test_staging_policy_defaults_to_off(tmp_path):
+    toml_file = tmp_path / "config.toml"
+    toml_file.write_text('[server]\nport = 7070\n')
+    cfg = load_config(project_config=toml_file)
+    assert cfg.ingest.staging_policy == "off"
+    assert cfg.ingest.staging_confidence_min == "high"
+
+
+def test_staging_policy_reads_from_toml(tmp_path):
+    toml_file = tmp_path / "config.toml"
+    toml_file.write_text('[ingest]\nstaging_policy = "all"\nstaging_confidence_min = "medium"\n')
+    cfg = load_config(project_config=toml_file)
+    assert cfg.ingest.staging_policy == "all"
+    assert cfg.ingest.staging_confidence_min == "medium"
+
+
+def test_context_token_budget_defaults_to_10000(tmp_path):
+    toml_file = tmp_path / "config.toml"
+    toml_file.write_text('[server]\nport = 7070\n')
+    cfg = load_config(project_config=toml_file)
+    assert cfg.query.context_token_budget == 10000
+
+
+def test_context_token_budget_reads_from_toml(tmp_path):
+    toml_file = tmp_path / "config.toml"
+    toml_file.write_text('[query]\ncontext_token_budget = 8000\n')
+    cfg = load_config(project_config=toml_file)
+    assert cfg.query.context_token_budget == 8000
+
+
+def test_adversarial_agent_config_parses(tmp_path):
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text(
+        '[agents]\ndefault = { provider = "anthropic", model = "claude-opus-4-6" }\n'
+        'adversarial = { provider = "gemini", model = "gemini-2.5-flash" }\n'
+    )
+    cfg = load_config(project_config=cfg_file)
+    adv = cfg.agents.resolve("adversarial")
+    assert adv.provider == "gemini"
+    assert adv.model == "gemini-2.5-flash"
+
+
+def test_adversarial_agent_config_fallback_to_default(tmp_path):
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text('[agents]\ndefault = { provider = "anthropic", model = "claude-opus-4-6" }\n')
+    cfg = load_config(project_config=cfg_file)
+    adv = cfg.agents.resolve("adversarial")
+    assert adv.provider == "anthropic"
+    assert adv.model == "claude-opus-4-6"
+
+
+def test_chat_config_defaults():
+    cfg = ChatConfig()
+    assert cfg.conversation_history_turns == 5
+    assert cfg.session_retention_days == 30
+
+
+def test_chat_config_from_toml(tmp_path):
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text(
+        '[agents.default]\nprovider="gemini"\nmodel="gemini-2.5-flash"\n'
+        '[chat]\nconversation_history_turns = 10\nsession_retention_days = 7\n'
+    )
+    cfg = load_config(project_config=cfg_file)
+    assert cfg.chat.conversation_history_turns == 10
+    assert cfg.chat.session_retention_days == 7
+
+
+def test_chat_config_zero_disables_history(tmp_path):
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text(
+        '[agents.default]\nprovider="gemini"\nmodel="gemini-2.5-flash"\n'
+        '[chat]\nconversation_history_turns = 0\n'
+    )
+    cfg = load_config(project_config=cfg_file)
+    assert cfg.chat.conversation_history_turns == 0
+
+
+def test_chat_config_defaults_via_load_config(tmp_path):
+    """Round-trip test: defaults are exposed via load_config when not set in TOML."""
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text('[agents.default]\nprovider="gemini"\nmodel="gemini-2.5-flash"\n')
+    cfg = load_config(project_config=cfg_file)
+    assert cfg.chat.conversation_history_turns == 5
+    assert cfg.chat.session_retention_days == 30
+
+
+def test_ingest_config_max_source_chars_default():
+    from synthadoc.config import IngestConfig
+    cfg = IngestConfig()
+    assert cfg.max_source_chars == 32000
+
+
+def test_ingest_config_max_source_chars_custom():
+    from synthadoc.config import load_config
+    import tempfile, pathlib, textwrap
+    with tempfile.NamedTemporaryFile(suffix=".toml", delete=False, mode="w") as f:
+        f.write(textwrap.dedent("""
+            [agents.default]
+            provider = "openai"
+            model = "gpt-4o"
+            [ingest]
+            max_source_chars = 64000
+        """))
+        name = f.name
+    cfg = load_config(project_config=pathlib.Path(name))
+    assert cfg.ingest.max_source_chars == 64000

@@ -1,0 +1,267 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Paul Chen / axoviq.com
+"""
+Performance tests — verifies SLOs from design doc Section 22.
+Run with: pytest tests/performance/ -v --benchmark-disable  (CI: skip timings)
+         pytest tests/performance/ -v --benchmark-only      (local: full benchmarks)
+"""
+import pytest
+import time
+from unittest.mock import AsyncMock
+
+
+def test_bm25_search_under_50ms(tmp_wiki):
+    """BM25 search over 100 pages must complete in < 200 ms (conservative cross-platform bound).
+    The design SLO is 50 ms on Linux; use pytest-benchmark for precise per-platform numbers."""
+    import platform
+    from synthadoc.storage.wiki import WikiStorage
+    from synthadoc.storage.search import HybridSearch
+
+    # macOS and Windows CI runners are slower and noisier than Linux bare-metal.
+    # Linux SLO is 100ms (design target 50ms; 2× headroom for shared CI runners).
+    # The benchmark test below records the precise steady-state number.
+    threshold_ms = 100 if platform.system() == "Linux" else 200
+
+    store = WikiStorage(tmp_wiki / "wiki")
+    for i in range(100):
+        store.write_page(f"page-{i:03d}", f"# Page {i}\nContent about topic {i}.", {})
+
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    # Warm-up: prime OS file cache and any lazy module state before measuring.
+    search.bm25_search(["topic", "content"], top_n=10)
+    start = time.perf_counter()
+    results = search.bm25_search(["topic", "content"], top_n=10)
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    assert elapsed_ms < threshold_ms, f"BM25 search took {elapsed_ms:.1f}ms — exceeds {threshold_ms}ms SLO"
+
+
+def test_bm25_search_benchmark(benchmark, tmp_wiki):
+    """pytest-benchmark version for CI reporting."""
+    from synthadoc.storage.wiki import WikiStorage
+    from synthadoc.storage.search import HybridSearch
+
+    store = WikiStorage(tmp_wiki / "wiki")
+    for i in range(100):
+        store.write_page(f"page-{i:03d}", f"# Page {i}\nContent about topic {i}.", {})
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    benchmark(search.bm25_search, ["topic", "content"], top_n=10)
+
+
+@pytest.mark.asyncio
+async def test_cache_hit_makes_zero_llm_calls(tmp_wiki):
+    """Second identical ingest (force=True) must make 0 analysis/decision LLM calls.
+
+    _update_overview() is excluded from this count — it always runs after a write
+    and is tested separately. We patch it out so this test focuses purely on the
+    analysis + decision cache behaviour.
+    """
+    from unittest.mock import patch
+    from synthadoc.agents.ingest_agent import IngestAgent
+    from synthadoc.storage.wiki import WikiStorage
+    from synthadoc.storage.search import HybridSearch
+    from synthadoc.storage.log import LogWriter, AuditDB
+    from synthadoc.core.cache import CacheManager
+    from synthadoc.providers.base import CompletionResponse
+
+    call_count = 0
+
+    async def counted_complete(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return CompletionResponse(
+            text='{"entities":[],"concepts":[],"tags":[]}',
+            input_tokens=10, output_tokens=5)
+
+    provider = AsyncMock()
+    provider.complete = AsyncMock(side_effect=counted_complete)
+
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, tmp_wiki / ".synthadoc" / "embeddings.db")
+    log = LogWriter(tmp_wiki / "wiki" / "log.md")
+    audit = AuditDB(tmp_wiki / ".synthadoc" / "audit.db")
+    await audit.init()
+    cache = CacheManager(tmp_wiki / ".synthadoc" / "cache.db")
+    await cache.init()
+    source = tmp_wiki / "raw_sources" / "cached.md"
+    source.write_text("# Cache test\nSame content every time.", encoding="utf-8")
+
+    agent = IngestAgent(provider=provider, store=store, search=search,
+                        log_writer=log, audit_db=audit, cache=cache, max_pages=15,
+                        wiki_root=tmp_wiki)
+
+    # Patch _update_overview and _annotate_citations so they don't consume LLM calls.
+    # Also mock bm25_search to always return [] so the decision cache key is stable
+    # across both runs — without this, Task 7's TF fallback makes a 1-page corpus
+    # return the page created in run 1 as a candidate, changing slugs in the cache key.
+    async def _noop_overview(self):
+        pass
+
+    async def _noop_annotate(self, section, source_text, filename, bust_cache: bool = False):
+        return section, []
+
+    try:
+        with patch.object(IngestAgent, "_update_overview", _noop_overview), \
+             patch.object(IngestAgent, "_annotate_citations", _noop_annotate), \
+             patch.object(search, "bm25_search", return_value=[]):
+            await agent.ingest(str(source))
+            first_count = call_count
+            call_count = 0
+            await agent.ingest(str(source), force=True)
+            second_count = call_count
+    finally:
+        await cache.close()
+
+    assert first_count > 0, "First ingest should have called LLM"
+    assert second_count == 0, f"Cache hit should make 0 LLM calls, made {second_count}"
+
+
+@pytest.mark.asyncio
+async def test_web_search_fanout_enqueue_is_fast(tmp_wiki):
+    """Enqueueing 20 web search child jobs must complete in < 5 seconds.
+
+    Measures SQLite write throughput only — not end-to-end processing speed.
+    See test_web_search_fanout_processing_is_fast for the processing SLO.
+    """
+    from synthadoc.core.queue import JobQueue
+
+    sd = tmp_wiki / ".synthadoc"
+    sd.mkdir(parents=True, exist_ok=True)
+    queue = JobQueue(sd / "jobs.db", max_retries=3)
+    await queue.init()
+
+    child_sources = [f"https://example.com/page-{i}" for i in range(20)]
+
+    start = time.perf_counter()
+    await queue.enqueue_many("ingest", [{"source": url, "force": False} for url in child_sources])
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 5.0, f"Enqueueing 20 child jobs took {elapsed:.2f}s — exceeds 5s SLO"
+
+    from synthadoc.core.queue import JobStatus
+    jobs = await queue.list_jobs(status=JobStatus.PENDING)
+    assert len(jobs) == 20, f"Expected 20 queued jobs, got {len(jobs)}"
+
+
+@pytest.mark.asyncio
+async def test_web_search_fanout_processing_is_fast(tmp_wiki):
+    """Processing 20 web search child jobs must complete in < 45 seconds.
+
+    Simulates the full fan-out pipeline with mocked LLM and HTTP calls:
+    WebSearchSkill returns 20 URLs → each enqueued as child ingest job →
+    worker loop processes all 20 → all jobs reach 'completed' status.
+
+    The 45s SLO allows ~2.25s per job on the slowest CI runner (Windows
+    GitHub Actions). Each job makes 2 mocked LLM calls (analyse + decide),
+    so this measures worker loop overhead and SQLite round-trips, not real
+    LLM latency.
+    """
+    from unittest.mock import AsyncMock, patch
+    from synthadoc.core.queue import JobQueue, JobStatus
+    from synthadoc.agents.ingest_agent import IngestAgent
+    from synthadoc.storage.wiki import WikiStorage
+    from synthadoc.storage.search import HybridSearch
+    from synthadoc.storage.log import LogWriter, AuditDB
+    from synthadoc.core.cache import CacheManager
+    from synthadoc.providers.base import CompletionResponse
+
+    sd = tmp_wiki / ".synthadoc"
+    sd.mkdir(parents=True, exist_ok=True)
+
+    # Patch SkillAgent.extract to return minimal text for URL sources
+    from synthadoc.skills.base import ExtractedContent
+
+    async def fake_extract(self, source):
+        idx = source.split("-")[-1]
+        return ExtractedContent(
+            text=f"# Page {idx}\nContent about topic {idx}.",
+            source_path=source,
+            metadata={},
+        )
+
+    analyse_resp = CompletionResponse(
+        text='{"entities":["topic"],"tags":["web"],"summary":"A web page.","relevant":true}',
+        input_tokens=10, output_tokens=5)
+    decide_resp = CompletionResponse(
+        text='{"reasoning":"new","action":"create","target":"","new_slug":"","update_content":"","page_content":""}',
+        input_tokens=10, output_tokens=5)
+
+    import itertools
+    provider = AsyncMock()
+    provider.complete = AsyncMock(side_effect=itertools.cycle([analyse_resp, decide_resp]))
+
+    store = WikiStorage(tmp_wiki / "wiki")
+    search = HybridSearch(store, sd / "embeddings.db")
+    log = LogWriter(tmp_wiki / "wiki" / "log.md")
+    audit = AuditDB(sd / "audit.db")
+    await audit.init()
+    cache = CacheManager(sd / "cache.db")
+    await cache.init()
+    queue = JobQueue(sd / "jobs.db", max_retries=3)
+    await queue.init()
+
+    # Enqueue 20 child ingest jobs (simulating web search fan-out)
+    urls = [f"https://example.com/page-{i}" for i in range(20)]
+    for url in urls:
+        await queue.enqueue("ingest", {"source": url, "force": False})
+
+    # Process all jobs through IngestAgent with mocked provider and skill
+    start = time.perf_counter()
+    try:
+        with patch.object(IngestAgent, "_update_overview", AsyncMock()):
+            with patch("synthadoc.agents.skill_agent.SkillAgent.extract", fake_extract):
+                while True:
+                    job = await queue.dequeue()
+                    if not job:
+                        break
+                    agent = IngestAgent(
+                        provider=provider, store=store, search=search,
+                        log_writer=log, audit_db=audit, cache=cache,
+                        max_pages=15, wiki_root=tmp_wiki,
+                    )
+                    try:
+                        result = await agent.ingest(job.payload["source"], force=True)
+                        await queue.complete(job.id, result={
+                            "pages_created": result.pages_created,
+                            "pages_updated": result.pages_updated,
+                        })
+                    except Exception as e:
+                        await queue.fail(job.id, str(e))
+    finally:
+        await cache.close()
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 45.0, f"Processing 20 web search jobs took {elapsed:.1f}s — exceeds 45s SLO"
+
+    completed = await queue.list_jobs(status=JobStatus.COMPLETED)
+    assert len(completed) == 20, f"Expected 20 completed jobs, got {len(completed)}"
+
+
+def test_health_endpoint_under_10ms(tmp_wiki):
+    """GET /health must respond in < 10 ms (Linux) / 20 ms (Windows/macOS).
+
+    Uses min-of-5 to eliminate OS scheduling jitter from single-sample noise.
+    Windows and macOS CI runners have higher syscall overhead than Linux bare-metal,
+    so apply the same 2× headroom used by the BM25 SLO test.
+    """
+    import platform
+    from fastapi.testclient import TestClient
+    from synthadoc.integration.http_server import create_app
+
+    threshold_ms = 10 if platform.system() == "Linux" else 20
+
+    client = TestClient(create_app(wiki_root=tmp_wiki))
+    # warm up — prime ASGI stack and any lazy module state
+    client.get("/health")
+    client.get("/health")
+
+    samples = []
+    for _ in range(5):
+        start = time.perf_counter()
+        resp = client.get("/health")
+        samples.append((time.perf_counter() - start) * 1000)
+
+    assert resp.status_code == 200
+    best_ms = min(samples)
+    assert best_ms < threshold_ms, (
+        f"/health best-of-5 took {best_ms:.1f}ms — exceeds {threshold_ms}ms SLO"
+    )
